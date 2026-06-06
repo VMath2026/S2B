@@ -1,0 +1,10 @@
+aiogram
+openai
+python-dotenv
+pydantic
+pydantic-settings
+SQLAlchemy
+psycopg[binary]
+alembic
+fastapi
+uvicorn

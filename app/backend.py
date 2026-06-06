@@ -1,0 +1,325 @@
+from decimal import Decimal
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import select, text
+
+from app.config import settings
+from app.db.models import Flower, Order, Shop, ShopSettings
+from app.db.session import SessionLocal, engine
+from app.services.flowers import get_active_flowers_for_shop
+from app.services.shops import get_active_shops_by_city, get_shop_by_id
+
+
+app = FastAPI(title="Flower AI Platform API")
+
+
+class FlowerCreate(BaseModel):
+    name: str
+    category: str | None = None
+    color: str | None = None
+    price_per_stem: Decimal = Field(gt=0)
+    quantity_available: int = Field(ge=0, default=0)
+    quantity_reserved: int = Field(ge=0, default=0)
+    photo_url: str | None = None
+    is_active: bool = True
+
+
+class FlowerUpdate(BaseModel):
+    name: str | None = None
+    category: str | None = None
+    color: str | None = None
+    price_per_stem: Decimal | None = Field(default=None, gt=0)
+    quantity_available: int | None = Field(default=None, ge=0)
+    quantity_reserved: int | None = Field(default=None, ge=0)
+    photo_url: str | None = None
+    is_active: bool | None = None
+
+
+class ShopSettingsUpdate(BaseModel):
+    greeting_text: str | None = None
+    tone: str | None = None
+    min_order_price: Decimal | None = Field(default=None, ge=0)
+    delivery_price: Decimal | None = Field(default=None, ge=0)
+    working_hours: str | None = None
+    manager_chat_id: int | None = None
+    ai_enabled: bool | None = None
+    image_generation_enabled: bool | None = None
+
+
+class OrderStatusUpdate(BaseModel):
+    status: str
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    with engine.connect() as connection:
+        connection.execute(text("select 1"))
+
+    return {"status": "ok"}
+
+
+def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
+    if not settings.admin_api_key:
+        raise HTTPException(status_code=503, detail="ADMIN_API_KEY is not configured")
+
+    if x_admin_key != settings.admin_api_key:
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+
+
+@app.get("/shops")
+def list_shops(city: str | None = Query(default=None)) -> list[dict[str, Any]]:
+    if city:
+        shops = get_active_shops_by_city(city)
+    else:
+        with SessionLocal() as session:
+            shops = list(
+                session.scalars(
+                    select(Shop)
+                    .where(Shop.status == "active")
+                    .order_by(Shop.city, Shop.name)
+                ).all()
+            )
+
+    return [_shop_to_dict(shop) for shop in shops]
+
+
+@app.get("/shops/{shop_id}")
+def get_shop(shop_id: int) -> dict[str, Any]:
+    shop = get_shop_by_id(shop_id)
+    if shop is None:
+        raise HTTPException(status_code=404, detail="Shop not found")
+
+    return _shop_to_dict(shop)
+
+
+@app.get("/shops/{shop_id}/flowers")
+def list_shop_flowers(shop_id: int) -> list[dict[str, Any]]:
+    shop = get_shop_by_id(shop_id)
+    if shop is None:
+        raise HTTPException(status_code=404, detail="Shop not found")
+
+    flowers = get_active_flowers_for_shop(shop_id)
+    return [_flower_to_dict(flower) for flower in flowers]
+
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return _order_to_dict(order)
+
+
+@app.get("/admin/shops/{shop_id}/flowers", dependencies=[Depends(require_admin)])
+def admin_list_flowers(shop_id: int) -> list[dict[str, Any]]:
+    _require_shop(shop_id)
+    with SessionLocal() as session:
+        flowers = list(
+            session.scalars(
+                select(Flower).where(Flower.shop_id == shop_id).order_by(Flower.name)
+            ).all()
+        )
+
+    return [_flower_to_dict(flower) for flower in flowers]
+
+
+@app.post("/admin/shops/{shop_id}/flowers", dependencies=[Depends(require_admin)])
+def admin_create_flower(shop_id: int, payload: FlowerCreate) -> dict[str, Any]:
+    _require_shop(shop_id)
+    with SessionLocal() as session:
+        flower = Flower(shop_id=shop_id, **payload.model_dump())
+        session.add(flower)
+        session.commit()
+        session.refresh(flower)
+        return _flower_to_dict(flower)
+
+
+@app.patch("/admin/flowers/{flower_id}", dependencies=[Depends(require_admin)])
+def admin_update_flower(flower_id: int, payload: FlowerUpdate) -> dict[str, Any]:
+    with SessionLocal() as session:
+        flower = session.get(Flower, flower_id)
+        if flower is None:
+            raise HTTPException(status_code=404, detail="Flower not found")
+
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            setattr(flower, key, value)
+
+        if flower.quantity_reserved > flower.quantity_available:
+            raise HTTPException(
+                status_code=400,
+                detail="quantity_reserved cannot exceed quantity_available",
+            )
+
+        session.commit()
+        session.refresh(flower)
+        return _flower_to_dict(flower)
+
+
+@app.delete("/admin/flowers/{flower_id}", dependencies=[Depends(require_admin)])
+def admin_deactivate_flower(flower_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        flower = session.get(Flower, flower_id)
+        if flower is None:
+            raise HTTPException(status_code=404, detail="Flower not found")
+
+        flower.is_active = False
+        session.commit()
+        session.refresh(flower)
+        return _flower_to_dict(flower)
+
+
+@app.get("/admin/shops/{shop_id}/settings", dependencies=[Depends(require_admin)])
+def admin_get_shop_settings(shop_id: int) -> dict[str, Any]:
+    _require_shop(shop_id)
+    with SessionLocal() as session:
+        shop_settings = _get_or_create_settings(session, shop_id)
+        session.commit()
+        session.refresh(shop_settings)
+        return _shop_settings_to_dict(shop_settings)
+
+
+@app.patch("/admin/shops/{shop_id}/settings", dependencies=[Depends(require_admin)])
+def admin_update_shop_settings(
+    shop_id: int,
+    payload: ShopSettingsUpdate,
+) -> dict[str, Any]:
+    _require_shop(shop_id)
+    with SessionLocal() as session:
+        shop_settings = _get_or_create_settings(session, shop_id)
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            setattr(shop_settings, key, value)
+
+        session.commit()
+        session.refresh(shop_settings)
+        return _shop_settings_to_dict(shop_settings)
+
+
+@app.get("/admin/shops/{shop_id}/orders", dependencies=[Depends(require_admin)])
+def admin_list_shop_orders(
+    shop_id: int,
+    status: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    _require_shop(shop_id)
+    with SessionLocal() as session:
+        query = select(Order).where(Order.shop_id == shop_id).order_by(Order.id.desc())
+        if status:
+            query = query.where(Order.status == status)
+        orders = list(session.scalars(query).all())
+
+    return [_order_to_dict(order) for order in orders]
+
+
+@app.patch("/admin/orders/{order_id}/status", dependencies=[Depends(require_admin)])
+def admin_update_order_status(
+    order_id: int,
+    payload: OrderStatusUpdate,
+) -> dict[str, Any]:
+    allowed_statuses = {"new", "accepted", "in_progress", "done", "cancelled"}
+    if payload.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of: {', '.join(sorted(allowed_statuses))}",
+        )
+
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        order.status = payload.status
+        session.commit()
+        session.refresh(order)
+        return _order_to_dict(order)
+
+
+def _shop_to_dict(shop: Shop) -> dict[str, Any]:
+    return {
+        "id": shop.id,
+        "name": shop.name,
+        "slug": shop.slug,
+        "city": shop.city,
+        "timezone": shop.timezone,
+        "status": shop.status,
+    }
+
+
+def _require_shop(shop_id: int) -> Shop:
+    shop = get_shop_by_id(shop_id)
+    if shop is None:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    return shop
+
+
+def _flower_to_dict(flower: Flower) -> dict[str, Any]:
+    return {
+        "id": flower.id,
+        "shop_id": flower.shop_id,
+        "name": flower.name,
+        "category": flower.category,
+        "color": flower.color,
+        "price_per_stem": _decimal_to_float(flower.price_per_stem),
+        "quantity_available": flower.quantity_available,
+        "quantity_reserved": flower.quantity_reserved,
+        "quantity_free": flower.quantity_available - flower.quantity_reserved,
+        "photo_url": flower.photo_url,
+        "is_active": flower.is_active,
+    }
+
+
+def _order_to_dict(order: Order) -> dict[str, Any]:
+    return {
+        "id": order.id,
+        "shop_id": order.shop_id,
+        "customer_id": order.customer_id,
+        "status": order.status,
+        "occasion": order.occasion,
+        "recipient": order.recipient,
+        "budget": _decimal_to_float(order.budget),
+        "style": order.style,
+        "colors": order.colors,
+        "avoid_flowers": order.avoid_flowers,
+        "delivery_date": order.delivery_date,
+        "delivery_address": order.delivery_address,
+        "phone": order.phone,
+        "comment": order.comment,
+        "generated_image_url": order.generated_image_url,
+        "total_price": _decimal_to_float(order.total_price),
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+    }
+
+
+def _shop_settings_to_dict(shop_settings: ShopSettings) -> dict[str, Any]:
+    return {
+        "id": shop_settings.id,
+        "shop_id": shop_settings.shop_id,
+        "greeting_text": shop_settings.greeting_text,
+        "tone": shop_settings.tone,
+        "min_order_price": _decimal_to_float(shop_settings.min_order_price),
+        "delivery_price": _decimal_to_float(shop_settings.delivery_price),
+        "working_hours": shop_settings.working_hours,
+        "manager_chat_id": shop_settings.manager_chat_id,
+        "ai_enabled": shop_settings.ai_enabled,
+        "image_generation_enabled": shop_settings.image_generation_enabled,
+    }
+
+
+def _get_or_create_settings(session, shop_id: int) -> ShopSettings:
+    shop_settings = session.scalar(
+        select(ShopSettings).where(ShopSettings.shop_id == shop_id)
+    )
+    if shop_settings is None:
+        shop_settings = ShopSettings(shop_id=shop_id)
+        session.add(shop_settings)
+        session.flush()
+    return shop_settings
+
+
+def _decimal_to_float(value: Decimal | None) -> float | None:
+    if value is None:
+        return None
+    return float(value)
