@@ -68,3 +68,32 @@ Open API docs:
 ```text
 http://127.0.0.1:8000/docs
 ```
+
+## Render Web Service
+
+Deploy this repository as a Render Web Service. The Dockerfile starts FastAPI on
+Render's `$PORT`.
+
+Set these environment variables in Render:
+
+```text
+BOT_TOKEN=
+OPENAI_API_KEY=
+ADMIN_API_KEY=
+APP_BASE_URL=https://your-render-service.onrender.com
+TELEGRAM_WEBHOOK_SECRET=
+INIT_DATABASE_ON_START=true
+SEED_DATABASE_ON_START=true
+DATABASE_URL=
+```
+
+After deploy, open:
+
+```text
+https://your-render-service.onrender.com/
+https://your-render-service.onrender.com/health
+```
+
+The root URL should return service info. Telegram updates are received at
+`/telegram/webhook`; the app registers this webhook automatically on startup when
+`BOT_TOKEN` and `APP_BASE_URL` are set.

@@ -1,18 +1,60 @@
 from decimal import Decimal
+from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.types import Update
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 
+from app.bot.handlers import router
 from app.config import settings
-from app.db.models import Flower, Order, Shop, ShopSettings
+from app.db.models import Base, Flower, Order, Shop, ShopSettings
+from app.db.seed import seed_db
 from app.db.session import SessionLocal, engine
 from app.services.flowers import get_active_flowers_for_shop
 from app.services.shops import get_active_shops_by_city, get_shop_by_id
 
 
-app = FastAPI(title="Flower AI Platform API")
+telegram_bot: Bot | None = None
+telegram_dispatcher = Dispatcher()
+telegram_dispatcher.include_router(router)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global telegram_bot
+
+    if settings.init_database_on_start:
+        Base.metadata.create_all(bind=engine)
+        if settings.seed_database_on_start:
+            seed_db()
+
+    if settings.bot_token:
+        telegram_bot = Bot(
+            token=settings.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+
+        public_url = _get_public_url()
+        if public_url:
+            webhook_url = f"{public_url}/telegram/webhook"
+            await telegram_bot.set_webhook(
+                webhook_url,
+                secret_token=settings.telegram_webhook_secret or None,
+                drop_pending_updates=True,
+            )
+
+    yield
+
+    if telegram_bot is not None:
+        await telegram_bot.session.close()
+
+
+app = FastAPI(title="Flower AI Platform API", lifespan=lifespan)
 
 
 class FlowerCreate(BaseModel):
@@ -60,12 +102,50 @@ def health() -> dict[str, Any]:
     return {"status": "ok"}
 
 
+@app.get("/")
+def root() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "Flower AI Platform",
+        "health": "/health",
+        "docs": "/docs",
+        "telegram_webhook": "/telegram/webhook",
+    }
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+) -> dict[str, str]:
+    if telegram_bot is None:
+        raise HTTPException(status_code=503, detail="BOT_TOKEN is not configured")
+
+    if (
+        settings.telegram_webhook_secret
+        and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
+
+    update = Update.model_validate(
+        await request.json(),
+        context={"bot": telegram_bot},
+    )
+    await telegram_dispatcher.feed_update(telegram_bot, update)
+    return {"status": "ok"}
+
+
 def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
     if not settings.admin_api_key:
         raise HTTPException(status_code=503, detail="ADMIN_API_KEY is not configured")
 
     if x_admin_key != settings.admin_api_key:
         raise HTTPException(status_code=401, detail="Invalid admin key")
+
+
+def _get_public_url() -> str:
+    public_url = settings.app_base_url or settings.render_external_url
+    return public_url.rstrip("/")
 
 
 @app.get("/shops")

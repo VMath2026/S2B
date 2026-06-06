@@ -6,6 +6,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-5.5"
     admin_api_key: str = ""
+    app_base_url: str = ""
+    render_external_url: str = ""
+    telegram_webhook_secret: str = ""
+    init_database_on_start: bool = True
+    seed_database_on_start: bool = False
     database_url: str
 
     model_config = SettingsConfigDict(
