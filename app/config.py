@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,9 +10,17 @@ class Settings(BaseSettings):
     app_base_url: str = ""
     render_external_url: str = ""
     telegram_webhook_secret: str = ""
+    default_manager_chat_id: int | None = None
     init_database_on_start: bool = True
     seed_database_on_start: bool = False
     database_url: str
+
+    @field_validator("default_manager_chat_id", mode="before")
+    @classmethod
+    def empty_chat_id_to_none(cls, value):
+        if value == "":
+            return None
+        return value
 
     model_config = SettingsConfigDict(
         env_file=".env",

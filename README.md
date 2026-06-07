@@ -82,6 +82,7 @@ OPENAI_API_KEY=
 ADMIN_API_KEY=
 APP_BASE_URL=https://your-render-service.onrender.com
 TELEGRAM_WEBHOOK_SECRET=
+DEFAULT_MANAGER_CHAT_ID=
 INIT_DATABASE_ON_START=true
 SEED_DATABASE_ON_START=true
 DATABASE_URL=
@@ -97,6 +98,11 @@ https://your-render-service.onrender.com/health
 The root URL should return service info. Telegram updates are received at
 `/telegram/webhook`; the app registers this webhook automatically on startup when
 `BOT_TOKEN` and `APP_BASE_URL` are set.
+
+To send every new order to a manager Telegram group, add the bot to that group,
+send `/chat_id` in the group, then put the returned numeric chat id into
+`DEFAULT_MANAGER_CHAT_ID` on Render and redeploy. For a specific shop, send
+`/bind_shop cvety-u-doma` in the manager group instead.
 
 ## Shop Admin Web
 

@@ -7,6 +7,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.ai.order_parser import AIUnavailableError, parse_order_message
+from app.config import settings
 from app.services.conversations import (
     get_or_create_conversation_state,
     reset_conversation_state,
@@ -455,24 +456,33 @@ async def _submit_order(
 
     shop_settings = get_shop_settings(shop.id)
     manager_text = _build_manager_order_message(order.id, shop.name, state)
+    manager_chat_id = (
+        shop_settings.manager_chat_id
+        if shop_settings and shop_settings.manager_chat_id
+        else settings.default_manager_chat_id
+    )
 
-    if shop_settings and shop_settings.manager_chat_id:
-        await message.bot.send_message(
-            shop_settings.manager_chat_id,
-            manager_text,
-            reply_markup=_manager_order_keyboard(order.id),
-        )
-        await message.answer(
-            _build_customer_order_card(order.id, shop.name, state)
-        )
-        return
+    if manager_chat_id:
+        try:
+            await message.bot.send_message(
+                manager_chat_id,
+                manager_text,
+                reply_markup=_manager_order_keyboard(order.id),
+            )
+            await message.answer(
+                _build_customer_order_card(order.id, shop.name, state)
+            )
+            return
+        except Exception:
+            logger.exception("Failed to send order notification to manager chat")
 
     await message.answer(
         _build_customer_order_card(order.id, shop.name, state)
         + "\n\n"
         f"Заказ сохранен, но группа менеджеров еще не настроена. "
-        "Чтобы получать уведомления в Telegram-группу, добавьте бота в группу "
-        "и укажите chat_id в shop_settings.manager_chat_id."
+        "Чтобы получать уведомления в Telegram-группу, добавьте бота в группу, "
+        "напишите там /chat_id и укажите этот chat_id в DEFAULT_MANAGER_CHAT_ID "
+        "или в shop_settings.manager_chat_id."
     )
 
 
@@ -554,19 +564,30 @@ def _build_manager_order_message(order_id: int, shop_name: str, state: dict) -> 
         f"{item.get('name')} x{item.get('quantity')}" for item in flowers
     ) or "не указаны"
 
+    total_price = state.get("estimated_price")
+    total_price_text = (
+        f"{float(total_price):.0f} руб."
+        if total_price not in (None, "")
+        else "уточнить"
+    )
+
     return (
-        f"Новый заказ №{order_id}\n"
+        f"Принят новый заказ №{order_id} на сумму {total_price_text}\n"
         f"Магазин: {shop_name}\n"
         f"Для кого: {state.get('recipient')}\n"
         f"Повод: {state.get('occasion')}\n"
         f"Бюджет: {state.get('budget')}\n"
         f"Цветы: {flowers_text}\n"
-        f"Цена: {state.get('estimated_price')} руб.\n"
-        f"Дата: {state.get('delivery_date')}\n"
-        f"Адрес: {state.get('delivery_address')}\n"
-        f"Телефон: {state.get('phone')}\n"
-        f"Комментарий: {state.get('comment')}"
+        f"Цена: {total_price_text}\n"
+        f"Дата: {_display_value(state.get('delivery_date'))}\n"
+        f"Адрес: {_display_value(state.get('delivery_address'))}\n"
+        f"Телефон: {_display_value(state.get('phone'))}\n"
+        f"Комментарий: {_display_value(state.get('comment'))}"
     )
+
+
+def _display_value(value: object) -> object:
+    return value if value not in (None, "") else "не указан"
 
 
 def _customer_order_keyboard() -> InlineKeyboardMarkup:
