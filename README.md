@@ -97,3 +97,28 @@ https://your-render-service.onrender.com/health
 The root URL should return service info. Telegram updates are received at
 `/telegram/webhook`; the app registers this webhook automatically on startup when
 `BOT_TOKEN` and `APP_BASE_URL` are set.
+
+## Shop Admin Web
+
+The React/TypeScript admin panel lives in `admin-web`.
+
+```powershell
+cd admin-web
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+Enter the Render API URL and `ADMIN_API_KEY`, then select a shop to manage
+products, inventory, prices, and shop settings.
+
+For Vercel, import the GitHub repository and set the project root directory to:
+
+```text
+admin-web
+```
