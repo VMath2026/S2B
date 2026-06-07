@@ -157,6 +157,9 @@ class Order(Base):
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     total_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    payment_status: Mapped[str] = mapped_column(Text, default="not_paid", nullable=False)
+    telegram_payment_charge_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_payment_charge_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 

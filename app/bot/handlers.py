@@ -1,10 +1,20 @@
 import asyncio
 import logging
+import re
+from datetime import datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 
 from app.ai.order_parser import AIUnavailableError, parse_order_message
 from app.config import settings
@@ -15,13 +25,21 @@ from app.services.conversations import (
 )
 from app.services.customers import get_customer_by_id, get_or_create_customer
 from app.services.flowers import get_active_flowers_for_shop, reserve_selected_flowers
-from app.services.orders import create_confirmed_order, update_order_status
+from app.services.orders import (
+    create_confirmed_order,
+    get_order_by_id,
+    list_recent_orders,
+    list_recent_orders_for_shop,
+    update_order_payment_status,
+    update_order_status,
+)
 from app.services.pricing import build_bouquet_options, calculate_selected_flowers_price
 from app.services.shops import (
     clear_current_shop_for_user,
     get_active_shops_by_city,
     get_current_shop_for_user,
     get_shop_by_id,
+    get_shop_by_manager_chat_id,
     get_shop_by_slug,
     get_shop_settings,
     set_manager_chat_for_shop,
@@ -78,19 +96,7 @@ async def start_handler(message: Message, command: CommandObject) -> None:
         customer_id=customer.id,
     )
 
-    shop_settings = get_shop_settings(shop.id)
-    greeting = (
-        shop_settings.greeting_text
-        if shop_settings and shop_settings.greeting_text
-        else f"Здравствуйте! Это бот магазина «{shop.name}»."
-    )
-
-    await message.answer(
-        f"{greeting}\n\n"
-        "Чтобы быстрее собрать заказ, напишите одним сообщением: для кого букет, "
-        "повод, бюджет, стиль или цвета, дату, адрес доставки и телефон.\n\n"
-        + _commands_help_text()
-    )
+    await message.answer(_build_shop_greeting_text(shop))
 
 
 @router.message(Command("reset"))
@@ -216,6 +222,119 @@ async def bind_shop_handler(message: Message, command: CommandObject) -> None:
     )
 
 
+@router.message(Command("orders"))
+async def manager_orders_handler(message: Message) -> None:
+    shop = _get_manager_shop_for_message(message)
+    is_default_manager_chat = _is_default_manager_chat(message)
+    if shop is None and not is_default_manager_chat:
+        await message.answer(
+            "Чтобы смотреть заказы здесь, привяжите группу к магазину командой:\n"
+            "/bind_shop slug-магазина"
+        )
+        return
+
+    orders = (
+        list_recent_orders_for_shop(shop.id, limit=10)
+        if shop is not None
+        else list_recent_orders(limit=10)
+    )
+    if not orders:
+        title = f"У магазина «{shop.name}»" if shop is not None else "В системе"
+        await message.answer(f"{title} пока нет заказов.")
+        return
+
+    title = f"магазина «{shop.name}»" if shop is not None else "всех магазинов"
+    await message.answer(_build_orders_list_message(title, orders))
+
+
+@router.message(Command("reply"))
+async def manager_reply_handler(message: Message, command: CommandObject) -> None:
+    shop = _get_manager_shop_for_message(message)
+    is_default_manager_chat = _is_default_manager_chat(message)
+    if shop is None and not is_default_manager_chat:
+        await message.answer("Сначала привяжите эту группу к магазину: /bind_shop slug-магазина")
+        return
+
+    args = (command.args or "").strip()
+    if not args or " " not in args:
+        await message.answer("Формат: /reply 12 текст сообщения клиенту")
+        return
+
+    order_id_text, reply_text = args.split(" ", maxsplit=1)
+    if not order_id_text.isdigit() or not reply_text.strip():
+        await message.answer("Формат: /reply 12 текст сообщения клиенту")
+        return
+
+    order = get_order_by_id(int(order_id_text))
+    if order is None or (shop is not None and order.shop_id != shop.id):
+        await message.answer("Заказ не найден в этом магазине.")
+        return
+
+    customer = get_customer_by_id(order.customer_id)
+    if customer is None:
+        await message.answer("Не нашел Telegram-клиента для этого заказа.")
+        return
+
+    try:
+        await message.bot.send_message(
+            customer.telegram_user_id,
+            f"Сообщение менеджера по заказу №{order.id}:\n{reply_text.strip()}",
+        )
+    except Exception:
+        logger.exception("Failed to send manager reply to customer")
+        await message.answer("Не смог отправить сообщение клиенту. Попробуйте позже.")
+        return
+
+    await message.answer(f"Отправил клиенту сообщение по заказу №{order.id}.")
+
+
+@router.callback_query(F.data.startswith("select_shop:"))
+async def select_shop_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
+    try:
+        shop_id = int((callback.data or "").split(":", maxsplit=1)[1])
+    except ValueError:
+        await callback.answer("Не смог выбрать магазин.", show_alert=True)
+        return
+
+    shop = get_shop_by_id(shop_id)
+    if shop is None:
+        await callback.answer("Магазин не найден.", show_alert=True)
+        return
+
+    customer = get_or_create_customer(
+        shop_id=shop.id,
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+    )
+    set_current_shop_for_user(callback.from_user.id, shop.id)
+    reset_conversation_state(shop.id, customer.id)
+    pending_shop_options.pop(callback.from_user.id, None)
+
+    await callback.answer("Магазин выбран.")
+    if callback.message is not None:
+        await callback.message.answer(_build_shop_greeting_text(shop))
+
+
+@router.callback_query(F.data == "change_shop_button")
+async def change_shop_button_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
+    clear_current_shop_for_user(callback.from_user.id)
+    pending_shop_options.pop(callback.from_user.id, None)
+    await callback.answer()
+    if callback.message is not None:
+        await callback.message.answer(
+            "Ок, выберем другой магазин. Напишите город, и я покажу доступные варианты."
+        )
+
+
 @router.callback_query(F.data == "confirm_order")
 async def confirm_order_callback(callback: CallbackQuery) -> None:
     if not _is_private_callback(callback):
@@ -234,6 +353,10 @@ async def confirm_order_callback(callback: CallbackQuery) -> None:
         first_name=callback.from_user.first_name,
     )
     state = get_or_create_conversation_state(shop.id, customer.id)
+    if state.get("order_submitted"):
+        await callback.answer("Этот заказ уже создан. Для нового заказа нажмите /new_order.", show_alert=True)
+        return
+
     if not state.get("is_ready_for_confirmation"):
         await callback.answer("Заказ еще не готов к подтверждению.", show_alert=True)
         return
@@ -375,6 +498,67 @@ async def manager_status_callback(callback: CallbackQuery) -> None:
         )
 
 
+@router.pre_checkout_query()
+async def pre_checkout_handler(query: PreCheckoutQuery) -> None:
+    order_id = _order_id_from_payment_payload(query.invoice_payload)
+    if order_id is None:
+        await query.answer(ok=False, error_message="Не смог найти заказ для оплаты.")
+        return
+
+    order = get_order_by_id(order_id)
+    if order is None:
+        await query.answer(ok=False, error_message="Заказ не найден.")
+        return
+
+    expected_amount = _payment_amount_minor(order.total_price)
+    if expected_amount is None or query.total_amount != expected_amount:
+        await query.answer(ok=False, error_message="Сумма заказа изменилась. Напишите /manager.")
+        return
+
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message) -> None:
+    payment = message.successful_payment
+    if payment is None:
+        return
+
+    order_id = _order_id_from_payment_payload(payment.invoice_payload)
+    if order_id is None:
+        await message.answer("Оплата прошла, но я не смог связать ее с заказом. Напишите /manager.")
+        return
+
+    order = update_order_payment_status(
+        order_id,
+        "paid",
+        telegram_payment_charge_id=payment.telegram_payment_charge_id,
+        provider_payment_charge_id=payment.provider_payment_charge_id,
+    )
+    if order is None:
+        await message.answer("Оплата прошла, но заказ не найден. Напишите /manager.")
+        return
+
+    paid_amount = Decimal(payment.total_amount) / Decimal(100)
+    await message.answer(
+        f"Оплата заказа №{order.id} получена: {paid_amount:.0f} {payment.currency}. "
+        "Спасибо! Менеджер увидит оплату и продолжит работу с заказом.",
+        reply_markup=_post_order_keyboard(),
+    )
+
+    manager_chat_id = _get_manager_chat_id(order.shop_id)
+    if manager_chat_id:
+        try:
+            await message.bot.send_message(
+                manager_chat_id,
+                f"Оплачен заказ №{order.id}\n"
+                f"Сумма: {paid_amount:.0f} {payment.currency}\n"
+                f"Telegram charge: {payment.telegram_payment_charge_id}",
+            )
+        except Exception:
+            logger.exception("Failed to send payment notification to manager chat")
+
+
 @router.message(F.text)
 async def text_handler(message: Message) -> None:
     if not _is_private_message(message):
@@ -470,6 +654,7 @@ async def text_handler(message: Message) -> None:
                 "Попробуйте увеличить бюджет или изменить пожелания."
             )
     else:
+        new_state["is_ready_for_confirmation"] = False
         calculated_price = calculate_selected_flowers_price(
             new_state.get("selected_flowers") or [],
             flowers,
@@ -520,18 +705,7 @@ async def _handle_shop_selection(message: Message, telegram_user_id: int) -> Non
             reset_conversation_state(shop.id, customer.id)
             pending_shop_options.pop(telegram_user_id, None)
 
-            shop_settings = get_shop_settings(shop.id)
-            greeting = (
-                shop_settings.greeting_text
-                if shop_settings and shop_settings.greeting_text
-                else f"Здравствуйте! Это бот магазина «{shop.name}»."
-            )
-            await message.answer(
-                f"{greeting}\n\n"
-                "Чтобы сэкономить запросы, напишите все пожелания одним сообщением: "
-                "для кого букет, повод, бюджет, стиль или цвета, дата, адрес доставки и телефон.\n\n"
-                + _commands_help_text()
-            )
+            await message.answer(_build_shop_greeting_text(shop))
             return
 
         await message.answer("Не вижу магазина под таким номером. Отправьте цифру из списка.")
@@ -547,8 +721,38 @@ async def _handle_shop_selection(message: Message, telegram_user_id: int) -> Non
     pending_shop_options[telegram_user_id] = [shop.id for shop in shops]
     lines = [f"{index}. {shop.name}" for index, shop in enumerate(shops, start=1)]
     await message.answer(
-        "Нашел магазины в вашем городе. Отправьте цифру нужного магазина:\n\n"
-        + "\n".join(lines)
+        "Нашел магазины в вашем городе. Выберите нужный кнопкой ниже или отправьте цифру:\n\n"
+        + "\n".join(lines),
+        reply_markup=_shop_selection_keyboard(shops),
+    )
+
+
+def _build_shop_greeting_text(shop) -> str:
+    shop_settings = get_shop_settings(shop.id)
+    greeting = (
+        shop_settings.greeting_text
+        if shop_settings and shop_settings.greeting_text
+        else f"Здравствуйте! Это бот магазина «{shop.name}»."
+    )
+    return (
+        f"{greeting}\n\n"
+        "Чтобы сэкономить запросы, напишите все пожелания одним сообщением: "
+        "для кого букет, повод, бюджет, стиль или цвета, дата, адрес доставки и телефон.\n\n"
+        + _commands_help_text()
+    )
+
+
+def _shop_selection_keyboard(shops: list) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=shop.name,
+                    callback_data=f"select_shop:{shop.id}",
+                )
+            ]
+            for shop in shops
+        ]
     )
 
 
@@ -692,6 +896,21 @@ async def _submit_order(
     customer_id: int,
     state: dict,
 ) -> None:
+    if state.get("order_submitted"):
+        await message.answer(
+            "Этот заказ уже создан. Чтобы оформить новый, нажмите /new_order.",
+            reply_markup=_post_order_keyboard(),
+        )
+        return
+
+    state = {
+        **state,
+        "delivery_date": _normalize_relative_delivery_date(
+            state.get("delivery_date"),
+            getattr(shop, "timezone", None),
+        ),
+    }
+
     unavailable = reserve_selected_flowers(
         shop_id=shop.id,
         selected_flowers=state.get("selected_flowers") or [],
@@ -717,6 +936,7 @@ async def _submit_order(
 
     manager_text = _build_manager_order_message(order.id, shop.name, state)
     manager_chat_id = _get_manager_chat_id(shop.id)
+    manager_notified = False
 
     if manager_chat_id:
         try:
@@ -725,21 +945,81 @@ async def _submit_order(
                 manager_text,
                 reply_markup=_manager_order_keyboard(order.id),
             )
-            await message.answer(
-                _build_customer_order_card(order.id, shop.name, state)
-            )
-            return
+            manager_notified = True
         except Exception:
             logger.exception("Failed to send order notification to manager chat")
 
-    await message.answer(
-        _build_customer_order_card(order.id, shop.name, state)
-        + "\n\n"
-        f"Заказ сохранен, но группа менеджеров еще не настроена. "
-        "Чтобы получать уведомления в Telegram-группу, добавьте бота в группу, "
-        "напишите там /chat_id и укажите этот chat_id в DEFAULT_MANAGER_CHAT_ID "
-        "или в shop_settings.manager_chat_id."
+    await _send_customer_order_completion(
+        message=message,
+        order=order,
+        shop_name=shop.name,
+        state=state,
+        manager_notified=manager_notified,
     )
+
+
+async def _send_customer_order_completion(
+    *,
+    message: Message,
+    order,
+    shop_name: str,
+    state: dict,
+    manager_notified: bool,
+) -> None:
+    text = _build_customer_order_card(order.id, shop_name, state)
+    if not manager_notified:
+        text += (
+            "\n\nЗаказ сохранен, но группа менеджеров еще не настроена. "
+            "Чтобы получать уведомления в Telegram-группу, добавьте бота в группу, "
+            "напишите там /chat_id и укажите этот chat_id в DEFAULT_MANAGER_CHAT_ID "
+            "или в shop_settings.manager_chat_id."
+        )
+
+    await message.answer(text, reply_markup=_post_order_keyboard())
+    await _send_payment_invoice(message, order, shop_name, state)
+
+
+async def _send_payment_invoice(
+    message: Message,
+    order,
+    shop_name: str,
+    state: dict,
+) -> None:
+    if not settings.payment_provider_token:
+        await message.answer(
+            "Онлайн-оплата пока не подключена. Менеджер пришлет способ оплаты после проверки заказа."
+        )
+        return
+
+    amount = _payment_amount_minor(order.total_price)
+    if amount is None:
+        await message.answer("Сумма заказа пока не определена. Менеджер уточнит оплату вручную.")
+        return
+
+    description_parts = [
+        f"Заказ №{order.id}",
+        str(state.get("summary") or state.get("occasion") or "букет"),
+        str(state.get("delivery_date") or ""),
+    ]
+    description = ". ".join(part for part in description_parts if part).strip()
+
+    try:
+        await message.bot.send_invoice(
+            chat_id=message.chat.id,
+            title=f"Букет от «{shop_name}»",
+            description=description[:240],
+            payload=f"order:{order.id}",
+            provider_token=settings.payment_provider_token,
+            currency=settings.payment_currency,
+            prices=[LabeledPrice(label=f"Заказ №{order.id}", amount=amount)],
+            start_parameter=f"flower-order-{order.id}",
+        )
+        update_order_payment_status(order.id, "invoice_sent")
+    except Exception:
+        logger.exception("Failed to send payment invoice")
+        await message.answer(
+            "Заказ создан, но счет на оплату сейчас не удалось отправить. Менеджер поможет с оплатой вручную."
+        )
 
 
 def _append_price_confirmation(
@@ -756,8 +1036,55 @@ def _append_price_confirmation(
 
 
 def _has_enough_details_for_options(state: dict) -> bool:
-    required_fields = ["recipient", "occasion", "budget", "style", "delivery_date", "phone"]
-    return all(state.get(field) for field in required_fields)
+    required_fields = [
+        "recipient",
+        "occasion",
+        "budget",
+        "style",
+        "delivery_date",
+        "delivery_address",
+    ]
+    return all(state.get(field) for field in required_fields) and _looks_like_phone(
+        state.get("phone")
+    )
+
+
+def _looks_like_phone(value: object) -> bool:
+    digits = "".join(char for char in str(value or "") if char.isdigit())
+    return len(digits) >= 10
+
+
+def _normalize_relative_delivery_date(value: object, timezone: str | None) -> str | None:
+    if value in (None, ""):
+        return None
+
+    text = str(value).strip()
+    lower_text = text.lower()
+    if _contains_calendar_date(text):
+        return text
+
+    try:
+        today = datetime.now(ZoneInfo(timezone or "Europe/Moscow")).date()
+    except Exception:
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+
+    offset_days: int | None = None
+    if "послезавтра" in lower_text:
+        offset_days = 2
+    elif "завтра" in lower_text:
+        offset_days = 1
+    elif "сегодня" in lower_text:
+        offset_days = 0
+
+    if offset_days is None:
+        return text
+
+    exact_date = today + timedelta(days=offset_days)
+    return f"{text} ({exact_date.strftime('%d.%m.%Y')})"
+
+
+def _contains_calendar_date(value: str) -> bool:
+    return bool(re.search(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b", value))
 
 
 def _build_bouquet_options_message(options: list[dict]) -> str:
@@ -835,15 +1162,105 @@ def _build_manager_order_message(order_id: int, shop_name: str, state: dict) -> 
         f"Бюджет: {state.get('budget')}\n"
         f"Цветы: {flowers_text}\n"
         f"Цена: {total_price_text}\n"
+        "Оплата: счет отправлен клиенту после оформления, если подключен PAYMENT_PROVIDER_TOKEN\n"
         f"Дата: {_display_value(state.get('delivery_date'))}\n"
         f"Адрес: {_display_value(state.get('delivery_address'))}\n"
         f"Телефон: {_display_value(state.get('phone'))}\n"
-        f"Комментарий: {_display_value(state.get('comment'))}"
+        f"Комментарий: {_display_value(state.get('comment'))}\n\n"
+        f"Ответить клиенту: /reply {order_id} текст сообщения"
     )
 
 
 def _display_value(value: object) -> object:
     return value if value not in (None, "") else "не указан"
+
+
+def _get_manager_shop_for_message(message: Message):
+    if _is_private_message(message):
+        return None
+    return get_shop_by_manager_chat_id(message.chat.id)
+
+
+def _is_default_manager_chat(message: Message) -> bool:
+    return (
+        settings.default_manager_chat_id is not None
+        and message.chat.id == settings.default_manager_chat_id
+    )
+
+
+def _build_orders_list_message(scope_title: str, orders: list) -> str:
+    lines = [f"Последние заказы {scope_title}:"]
+    for order in orders:
+        price = (
+            f"{Decimal(str(order.total_price)):.0f} руб."
+            if order.total_price not in (None, "")
+            else "сумма не указана"
+        )
+        lines.append(
+            f"№{order.id}: {_status_label(order.status)}, "
+            f"{_payment_status_label(order.payment_status)}, {price}\n"
+            f"Дата: {_display_value(order.delivery_date)}\n"
+            f"Телефон: {_display_value(order.phone)}"
+        )
+    lines.append("\nОтвет клиенту: /reply 12 текст сообщения")
+    return "\n\n".join(lines)
+
+
+def _payment_amount_minor(total_price: object) -> int | None:
+    if total_price in (None, ""):
+        return None
+
+    try:
+        amount = (Decimal(str(total_price)).quantize(Decimal("0.01")) * 100)
+    except Exception:
+        return None
+
+    amount_minor = int(amount)
+    return amount_minor if amount_minor > 0 else None
+
+
+def _order_id_from_payment_payload(payload: str | None) -> int | None:
+    if not payload or not payload.startswith("order:"):
+        return None
+
+    order_id_text = payload.split(":", maxsplit=1)[1]
+    if not order_id_text.isdigit():
+        return None
+    return int(order_id_text)
+
+
+def _payment_status_label(status: str | None) -> str:
+    labels = {
+        "not_paid": "не оплачен",
+        "invoice_sent": "счет отправлен",
+        "paid": "оплачен",
+        "failed": "оплата не прошла",
+        "refunded": "возврат",
+    }
+    return labels.get(status or "not_paid", status or "не оплачен")
+
+
+def _post_order_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Новый заказ",
+                    callback_data="reset_order",
+                ),
+                InlineKeyboardButton(
+                    text="Другой магазин",
+                    callback_data="change_shop_button",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Позвать менеджера",
+                    callback_data="call_manager",
+                )
+            ],
+        ]
+    )
 
 
 def _customer_order_keyboard() -> InlineKeyboardMarkup:
@@ -930,15 +1347,26 @@ def _build_customer_order_card(order_id: int, shop_name: str, state: dict) -> st
     flowers_text = ", ".join(
         f"{item.get('name')} x{item.get('quantity')}" for item in flowers
     ) or "состав уточнит менеджер"
+    price_text = (
+        f"{float(state.get('estimated_price')):.0f} руб."
+        if state.get("estimated_price") not in (None, "")
+        else "уточнит менеджер"
+    )
+    payment_text = (
+        "Счет на оплату придет следующим сообщением."
+        if settings.payment_provider_token
+        else "Оплату менеджер пришлет вручную после проверки заказа."
+    )
 
     return (
         f"Заказ №{order_id} принят\n\n"
         f"Магазин: {shop_name}\n"
         f"Букет: {flowers_text}\n"
-        f"Примерная цена: {state.get('estimated_price')} руб.\n"
-        f"Для кого: {state.get('recipient')}\n"
-        f"Повод: {state.get('occasion')}\n"
-        f"Доставка: {state.get('delivery_date')}, {state.get('delivery_address')}\n"
-        f"Телефон: {state.get('phone')}\n\n"
+        f"Примерная цена: {price_text}\n"
+        f"Для кого: {_display_value(state.get('recipient'))}\n"
+        f"Повод: {_display_value(state.get('occasion'))}\n"
+        f"Доставка: {_display_value(state.get('delivery_date'))}, {_display_value(state.get('delivery_address'))}\n"
+        f"Телефон: {_display_value(state.get('phone'))}\n"
+        f"Оплата: {payment_text}\n\n"
         "Менеджер проверит наличие цветов, финальную стоимость и скоро свяжется с вами."
     )

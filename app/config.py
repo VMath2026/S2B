@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     render_external_url: str = ""
     telegram_webhook_secret: str = ""
     default_manager_chat_id: int | None = None
+    payment_provider_token: str = ""
+    payment_currency: str = "RUB"
     init_database_on_start: bool = True
     seed_database_on_start: bool = False
     database_url: str

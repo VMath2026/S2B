@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 
+from app.bot.commands import get_bot_commands
 from app.bot.handlers import router
 from app.config import settings
 from app.db.models import Base, Flower, Order, Shop, ShopSettings
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
 
     if settings.init_database_on_start:
         Base.metadata.create_all(bind=engine)
+        _run_startup_schema_updates()
         if settings.seed_database_on_start:
             seed_db()
 
@@ -49,6 +51,7 @@ async def lifespan(app: FastAPI):
                 secret_token=settings.telegram_webhook_secret or None,
                 drop_pending_updates=True,
             )
+            await telegram_bot.set_my_commands(get_bot_commands())
 
     yield
 
@@ -176,6 +179,28 @@ def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
 def _get_public_url() -> str:
     public_url = settings.app_base_url or settings.render_external_url
     return public_url.rstrip("/")
+
+
+def _run_startup_schema_updates() -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "alter table orders "
+                "add column if not exists payment_status text not null default 'not_paid'"
+            )
+        )
+        connection.execute(
+            text(
+                "alter table orders "
+                "add column if not exists telegram_payment_charge_id text"
+            )
+        )
+        connection.execute(
+            text(
+                "alter table orders "
+                "add column if not exists provider_payment_charge_id text"
+            )
+        )
 
 
 @app.get("/shops")
@@ -399,6 +424,9 @@ def _order_to_dict(order: Order) -> dict[str, Any]:
         "comment": order.comment,
         "generated_image_url": order.generated_image_url,
         "total_price": _decimal_to_float(order.total_price),
+        "payment_status": order.payment_status,
+        "telegram_payment_charge_id": order.telegram_payment_charge_id,
+        "provider_payment_charge_id": order.provider_payment_charge_id,
         "created_at": order.created_at.isoformat() if order.created_at else None,
     }
 

@@ -35,6 +35,18 @@ def get_shop_by_id(shop_id: int) -> Shop | None:
         )
 
 
+def get_shop_by_manager_chat_id(manager_chat_id: int) -> Shop | None:
+    with SessionLocal() as session:
+        return session.scalar(
+            select(Shop)
+            .join(ShopSettings, ShopSettings.shop_id == Shop.id)
+            .where(
+                ShopSettings.manager_chat_id == manager_chat_id,
+                Shop.status == "active",
+            )
+        )
+
+
 def get_active_shops_by_city(city: str) -> list[Shop]:
     normalized_city = city.strip()
     if not normalized_city:

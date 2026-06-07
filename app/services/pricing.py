@@ -1,4 +1,5 @@
 from decimal import Decimal
+from itertools import combinations
 
 from app.db.models import Flower
 
@@ -35,7 +36,7 @@ def build_bouquet_options(
     budget: float | int | str | None,
     colors: list[str] | None = None,
     style: str | None = None,
-    max_options: int = 5,
+    max_options: int = 7,
 ) -> list[dict]:
     budget_decimal = _to_decimal_or_none(budget)
     if budget_decimal is None or budget_decimal <= 0:
@@ -66,7 +67,11 @@ def build_bouquet_options(
     options: list[dict] = []
     seen: set[tuple[tuple[str, int], ...]] = set()
 
+    monobouquet_limit = min(3, max_options)
     for flower in sorted_flowers:
+        if len(options) >= monobouquet_limit:
+            break
+
         quantity = _odd_quantity(
             min(
                 int(
@@ -89,49 +94,65 @@ def build_bouquet_options(
                 max_options=max_options,
             )
 
-    for first_index, first in enumerate(sorted_flowers):
-        for second in sorted_flowers[first_index + 1 :]:
-            if len(options) >= max_options:
-                break
+    for first, second in combinations(sorted_flowers, 2):
+        selected_flowers = _build_mix_selection(
+            [first, second],
+            budget_decimal,
+            [Decimal("0.55"), Decimal("0.30")],
+        )
+        if not selected_flowers:
+            continue
 
-            first_quantity = _odd_quantity(
-                min(
-                    int(
-                        budget_decimal
-                        * Decimal("0.55")
-                        / Decimal(str(first.price_per_stem))
-                    ),
-                    first.quantity_available - first.quantity_reserved,
-                )
-            )
-            second_quantity = _odd_quantity(
-                min(
-                    int(
-                        budget_decimal
-                        * Decimal("0.30")
-                        / Decimal(str(second.price_per_stem))
-                    ),
-                    second.quantity_available - second.quantity_reserved,
-                )
-            )
-            if first_quantity < 3 or second_quantity < 3:
-                continue
+        _append_option(
+            options,
+            seen,
+            title=f"Микс: {first.name} + {second.name}",
+            description=_build_description([first, second], style),
+            selected_flowers=selected_flowers,
+            flowers=available_flowers,
+            budget=budget_decimal,
+            max_options=max_options,
+        )
 
-            _append_option(
-                options,
-                seen,
-                title=f"Микс: {first.name} + {second.name}",
-                description=_build_description([first, second], style),
-                selected_flowers=[
-                    {"name": first.name, "quantity": first_quantity},
-                    {"name": second.name, "quantity": second_quantity},
-                ],
-                flowers=available_flowers,
-                budget=budget_decimal,
-                max_options=max_options,
-            )
+    for first, second, third in combinations(sorted_flowers, 3):
+        selected_flowers = _build_mix_selection(
+            [first, second, third],
+            budget_decimal,
+            [Decimal("0.45"), Decimal("0.25"), Decimal("0.18")],
+        )
+        if not selected_flowers:
+            continue
+
+        _append_option(
+            options,
+            seen,
+            title=f"Сборный букет: {first.name} + {second.name} + {third.name}",
+            description=_build_description([first, second, third], style),
+            selected_flowers=selected_flowers,
+            flowers=available_flowers,
+            budget=budget_decimal,
+            max_options=max_options,
+        )
 
     return options[:max_options]
+
+
+def _build_mix_selection(
+    flowers: list[Flower],
+    budget: Decimal,
+    budget_ratios: list[Decimal],
+) -> list[dict]:
+    selected_flowers: list[dict] = []
+    for flower, ratio in zip(flowers, budget_ratios):
+        price = Decimal(str(flower.price_per_stem))
+        available = flower.quantity_available - flower.quantity_reserved
+        quantity = _odd_quantity(min(int(budget * ratio / price), available))
+        if quantity < 3:
+            return []
+
+        selected_flowers.append({"name": flower.name, "quantity": quantity})
+
+    return selected_flowers
 
 
 def _append_option(

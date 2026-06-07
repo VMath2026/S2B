@@ -10,6 +10,7 @@ Multi-tenant Telegram/AI platform for flower shops.
 - AI checks shop inventory and flower prices.
 - Customer confirms the order.
 - Order is saved and sent to the shop manager Telegram group.
+- Customer can pay the order through Telegram Payments when configured.
 
 ## Stack
 
@@ -83,6 +84,8 @@ ADMIN_API_KEY=
 APP_BASE_URL=https://your-render-service.onrender.com
 TELEGRAM_WEBHOOK_SECRET=
 DEFAULT_MANAGER_CHAT_ID=
+PAYMENT_PROVIDER_TOKEN=
+PAYMENT_CURRENCY=RUB
 INIT_DATABASE_ON_START=true
 SEED_DATABASE_ON_START=true
 DATABASE_URL=
@@ -103,6 +106,18 @@ To send every new order to a manager Telegram group, add the bot to that group,
 send `/chat_id` in the group, then put the returned numeric chat id into
 `DEFAULT_MANAGER_CHAT_ID` on Render and redeploy. For a specific shop, send
 `/bind_shop cvety-u-doma` in the manager group instead.
+
+Manager group commands:
+
+```text
+/orders
+/reply 12 текст сообщения клиенту
+```
+
+To enable online payment after order confirmation, connect a Telegram Payments
+provider in BotFather and put its token into `PAYMENT_PROVIDER_TOKEN`. The bot
+will send an invoice to the customer after the order is created and will notify
+the manager group when the payment succeeds.
 
 ## Shop Admin Web
 

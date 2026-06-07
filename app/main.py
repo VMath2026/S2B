@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from app.bot.commands import get_bot_commands
 from app.bot.handlers import router
 from app.config import settings
 
@@ -22,6 +23,8 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(router)
+
+    await bot.set_my_commands(get_bot_commands())
 
     print("Bot started.")
     await dp.start_polling(bot)
