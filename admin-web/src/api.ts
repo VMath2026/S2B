@@ -34,6 +34,12 @@ export type ShopSettings = {
   image_generation_enabled: boolean;
 };
 
+export type LoginResponse = {
+  token: string;
+  shop: Shop;
+  username: string;
+};
+
 export type FlowerPayload = {
   name: string;
   category?: string | null;
@@ -47,7 +53,8 @@ export type FlowerPayload = {
 
 type ApiConfig = {
   baseUrl: string;
-  adminKey: string;
+  adminKey?: string;
+  token?: string;
 };
 
 function buildUrl(baseUrl: string, path: string) {
@@ -63,7 +70,8 @@ async function request<T>(
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-Admin-Key": config.adminKey,
+      ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}),
+      ...(config.adminKey ? { "X-Admin-Key": config.adminKey } : {}),
       ...options.headers,
     },
   });
@@ -75,6 +83,17 @@ async function request<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+export function loginShop(baseUrl: string, username: string, password: string) {
+  return request<LoginResponse>(
+    { baseUrl },
+    "/admin/auth/login",
+    {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    },
+  );
 }
 
 export function listShops(config: ApiConfig) {
@@ -122,4 +141,19 @@ export function updateSettings(
     method: "PATCH",
     body: JSON.stringify(payload),
   });
+}
+
+export function setShopCredentials(
+  config: ApiConfig,
+  shopId: number,
+  payload: { username: string; password: string },
+) {
+  return request<{ shop_id: number; shop_name: string; username: string }>(
+    config,
+    `/admin/shops/${shopId}/credentials`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }

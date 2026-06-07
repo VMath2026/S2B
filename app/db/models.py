@@ -51,6 +51,25 @@ class ShopSettings(Base):
     image_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
+class ShopAdminUser(Base):
+    __tablename__ = "shop_admin_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    username: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class Customer(Base):
     __tablename__ = "customers"
 

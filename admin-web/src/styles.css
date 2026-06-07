@@ -35,12 +35,32 @@ button {
   padding: 24px;
 }
 
+.loginShell {
+  display: grid;
+  width: min(520px, 100%);
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 24px;
+  place-items: center;
+}
+
+.loginPanel {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 22px;
+}
+
 .topbar,
 .contentHead,
 .connection,
 .workspace,
 .addRow,
-.settingsGrid {
+.settingsGrid,
+.credentialsPanel {
   border: 1px solid #d8d0c3;
   background: #fffdf8;
 }
@@ -52,6 +72,11 @@ button {
   min-height: 92px;
   padding: 20px 22px;
   border-radius: 8px;
+}
+
+.topActions {
+  display: flex;
+  gap: 8px;
 }
 
 .eyebrow {
@@ -129,7 +154,8 @@ select:focus {
 .primary,
 .iconButton,
 .tabs button,
-.shop {
+.shop,
+.modeSwitch button {
   border: 1px solid #cfc7bc;
   border-radius: 6px;
   background: #fff;
@@ -164,7 +190,8 @@ select:focus {
 
 .iconButton:hover,
 .tabs button:hover,
-.shop:hover {
+.shop:hover,
+.modeSwitch button:hover {
   border-color: #537f68;
 }
 
@@ -240,7 +267,8 @@ select:focus {
   gap: 6px;
 }
 
-.tabs button {
+.tabs button,
+.modeSwitch button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -249,10 +277,25 @@ select:focus {
   font-weight: 700;
 }
 
-.tabs button.active {
+.modeSwitch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.modeSwitch button {
+  justify-content: center;
+}
+
+.tabs button.active,
+.modeSwitch button.active {
   border-color: #2f6f55;
   background: #17201b;
   color: #fff;
+}
+
+.loginButton {
+  width: 100%;
 }
 
 .addRow {
@@ -342,6 +385,20 @@ td input {
   justify-self: start;
 }
 
+.credentialsPanel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  gap: 14px;
+  align-items: end;
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.credentialsPanel > div {
+  grid-column: 1 / -1;
+}
+
 .empty {
   margin-top: 14px;
   border: 1px solid #d8d0c3;
@@ -369,7 +426,8 @@ td input {
   .connection,
   .workspace,
   .addRow,
-  .settingsGrid {
+  .settingsGrid,
+  .credentialsPanel {
     grid-template-columns: 1fr;
   }
 

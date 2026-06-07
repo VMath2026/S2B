@@ -87,6 +87,7 @@ OPENAI_IMAGE_SIZE=1024x1024
 OPENAI_IMAGE_QUALITY=low
 OPENAI_IMAGE_FORMAT=png
 ADMIN_API_KEY=
+ADMIN_SESSION_SECRET=
 APP_BASE_URL=https://your-render-service.onrender.com
 TELEGRAM_WEBHOOK_SECRET=
 DEFAULT_MANAGER_CHAT_ID=
@@ -152,8 +153,13 @@ Open:
 http://127.0.0.1:5173
 ```
 
-Enter the Render API URL and `ADMIN_API_KEY`, then select a shop to manage
-products, inventory, prices, and shop settings.
+The admin panel supports two login modes:
+
+- `Магазин`: shop login and password. The shop only sees its own products and settings.
+- `Владелец`: Render API URL and `ADMIN_API_KEY`. Use this mode to select any shop and issue or reset shop credentials in `Настройки -> Доступ магазина`.
+
+Set `ADMIN_SESSION_SECRET` in Render to a long random value. If it is empty, the
+backend falls back to `ADMIN_API_KEY` for signing shop sessions.
 
 For Vercel, import the GitHub repository and set the project root directory to:
 

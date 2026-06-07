@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     openai_image_quality: str = "low"
     openai_image_format: str = "png"
     admin_api_key: str = ""
+    admin_session_secret: str = ""
     app_base_url: str = ""
     render_external_url: str = ""
     telegram_webhook_secret: str = ""
