@@ -36,6 +36,9 @@ MAX_AI_REQUESTS_PER_ORDER = 3
 
 @router.message(CommandStart())
 async def start_handler(message: Message, command: CommandObject) -> None:
+    if not _is_private_message(message):
+        return
+
     if message.from_user is None:
         return
 
@@ -87,6 +90,9 @@ async def start_handler(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("reset"))
 async def reset_handler(message: Message) -> None:
+    if not _is_private_message(message):
+        return
+
     if message.from_user is None:
         return
 
@@ -146,6 +152,10 @@ async def bind_shop_handler(message: Message, command: CommandObject) -> None:
 
 @router.callback_query(F.data == "confirm_order")
 async def confirm_order_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
     shop = get_current_shop_for_user(callback.from_user.id)
     if shop is None:
         await callback.answer("Сначала выберите магазин.", show_alert=True)
@@ -169,6 +179,10 @@ async def confirm_order_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "change_order")
 async def change_order_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
     await callback.answer()
     if callback.message is not None:
         await callback.message.answer(
@@ -178,6 +192,10 @@ async def change_order_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("select_bouquet:"))
 async def select_bouquet_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
     shop = get_current_shop_for_user(callback.from_user.id)
     if shop is None:
         await callback.answer("Сначала выберите магазин.", show_alert=True)
@@ -220,6 +238,10 @@ async def select_bouquet_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "reset_order")
 async def reset_order_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
     shop = get_current_shop_for_user(callback.from_user.id)
     if shop is None:
         await callback.answer("Магазин не выбран.", show_alert=True)
@@ -254,6 +276,9 @@ async def manager_status_callback(callback: CallbackQuery) -> None:
 
 @router.message(F.text)
 async def text_handler(message: Message) -> None:
+    if not _is_private_message(message):
+        return
+
     if message.from_user is None:
         return
 
@@ -423,6 +448,14 @@ async def _handle_shop_selection(message: Message, telegram_user_id: int) -> Non
 def _is_confirmation_message(text: str | None) -> bool:
     normalized = (text or "").strip().lower()
     return normalized in {"да", "подтверждаю", "подходит", "ок", "окей", "yes", "y"}
+
+
+def _is_private_message(message: Message) -> bool:
+    return message.chat.type == "private"
+
+
+def _is_private_callback(callback: CallbackQuery) -> bool:
+    return callback.message is None or callback.message.chat.type == "private"
 
 
 async def _submit_order(
