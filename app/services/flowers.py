@@ -60,3 +60,21 @@ def reserve_selected_flowers(shop_id: int, selected_flowers: list[dict]) -> list
 
         session.commit()
         return []
+
+
+def reset_reserved_flowers_for_shop(shop_id: int) -> int:
+    with SessionLocal() as session:
+        flowers = list(
+            session.scalars(
+                select(Flower).where(Flower.shop_id == shop_id)
+            ).all()
+        )
+
+        updated = 0
+        for flower in flowers:
+            if flower.quantity_reserved > 0:
+                flower.quantity_reserved = 0
+                updated += 1
+
+        session.commit()
+        return updated

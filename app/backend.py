@@ -25,7 +25,7 @@ from app.services.admin_auth import (
     create_shop_admin_token,
     verify_shop_admin_token,
 )
-from app.services.flowers import get_active_flowers_for_shop
+from app.services.flowers import get_active_flowers_for_shop, reset_reserved_flowers_for_shop
 from app.services.shops import get_active_shops_by_city, get_shop_by_id
 
 
@@ -427,6 +427,13 @@ def admin_create_flower(shop_id: int, payload: FlowerCreate) -> dict[str, Any]:
         session.commit()
         session.refresh(flower)
         return _flower_to_dict(flower)
+
+
+@app.post("/admin/shops/{shop_id}/flowers/reset-reserved", dependencies=[Depends(require_shop_access)])
+def admin_reset_reserved_flowers(shop_id: int) -> dict[str, Any]:
+    _require_shop(shop_id)
+    updated = reset_reserved_flowers_for_shop(shop_id)
+    return {"status": "ok", "updated": updated}
 
 
 @app.patch("/admin/flowers/{flower_id}", dependencies=[Depends(require_flower_access)])

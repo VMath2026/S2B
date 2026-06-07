@@ -706,6 +706,7 @@ async def text_handler(message: Message) -> None:
 
     should_validate = ai_response.message_kind not in {"irrelevant", "unsafe"}
     validation = None
+    show_manager_help_keyboard = False
     if should_validate:
         validation = validate_order_state(
             new_state,
@@ -730,9 +731,10 @@ async def text_handler(message: Message) -> None:
         else:
             new_state["bouquet_options"] = []
             new_state["is_ready_for_confirmation"] = False
-            ai_response.reply += (
-                "\n\nНе смог собрать варианты в этот бюджет по текущим остаткам. "
-                "Попробуйте увеличить бюджет или изменить пожелания."
+            show_manager_help_keyboard = True
+            ai_response.reply = (
+                "Не смог собрать варианты по указанным цветам и текущим свободным остаткам. "
+                "Попробуйте изменить цвета, увеличить бюджет или позовите менеджера."
             )
     else:
         new_state["is_ready_for_confirmation"] = False
@@ -762,7 +764,8 @@ async def text_handler(message: Message) -> None:
             )
             if new_state.get("is_ready_for_confirmation")
             else _manager_help_keyboard()
-            if int(new_state.get("ai_requests_used") or 0) >= MAX_AI_REQUESTS_PER_ORDER
+            if show_manager_help_keyboard
+            or int(new_state.get("ai_requests_used") or 0) >= MAX_AI_REQUESTS_PER_ORDER
             else None
         ),
     )

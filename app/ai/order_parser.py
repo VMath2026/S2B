@@ -132,11 +132,7 @@ def _merge_missing_state_values(state: dict, hints: dict) -> dict:
     merged = dict(state)
     for key, value in hints.items():
         if key == "colors":
-            existing_colors = [str(color).lower() for color in merged.get("colors") or []]
-            merged["colors"] = list(merged.get("colors") or [])
-            for color in value:
-                if str(color).lower() not in existing_colors:
-                    merged["colors"].append(color)
+            merged["colors"] = _dedupe_list(value)
             continue
 
         if value not in (None, "", []) and not merged.get(key):
@@ -193,10 +189,12 @@ def _extract_text_hints(message: str) -> dict:
     color_words = {
         "красн": "red",
         "син": "blue",
+        "голуб": "blue",
         "бел": "white",
         "розов": "pink",
         "желт": "yellow",
-        "фиолет": "lavender",
+        "фиолет": "purple",
+        "сирен": "lavender",
         "лаванд": "lavender",
     }
     colors = [
@@ -350,6 +348,7 @@ def _build_system_prompt(
         "Strict behavior rules:\n"
         "- Keep existing state values unless the customer clearly changes them.\n"
         "- Extract only details the customer actually provided or clearly implied.\n"
+        "- If detected_hints.colors is not empty, copy exactly those colors into state.colors and do not add other colors.\n"
         "- Do not conduct a long interview one field at a time.\n"
         "- If several required fields are missing, ask for all of them in one compact message.\n"
         "- Ask at most one combined question in reply.\n"
@@ -389,6 +388,18 @@ def _build_system_prompt(
         f"{settings_text}\n"
         f"Available flowers:\n{flowers_text}"
     )
+
+
+def _dedupe_list(values: list[Any]) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        key = str(value).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
 
 
 def _json_safe(value: Any) -> Any:

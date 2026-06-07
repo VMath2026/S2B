@@ -9,6 +9,7 @@ import {
   LogOut,
   PackagePlus,
   RefreshCw,
+  RotateCcw,
   Save,
   Settings,
   ShieldCheck,
@@ -26,6 +27,7 @@ import {
   listFlowers,
   listShops,
   loginShop,
+  resetReservedFlowers,
   setShopCredentials,
   Shop,
   ShopSettings,
@@ -216,8 +218,8 @@ function App() {
 
   async function addFlower() {
     if (!shopId || !config) return;
-    if (!draft.name.trim() || draft.price_per_stem <= 0) {
-      setMessage("Заполните название товара и цену за стебель.");
+    if (!draft.name.trim() || draft.price_per_stem <= 0 || draft.quantity_available <= 0) {
+      setMessage("Укажите название, цену за стебель больше 0 и количество в наличии больше 0.");
       return;
     }
 
@@ -265,6 +267,21 @@ function App() {
     } catch (error) {
       if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось скрыть товар.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetReserved() {
+    if (!shopId || !config) return;
+    setBusy(true);
+    try {
+      const response = await resetReservedFlowers(config, shopId);
+      await reloadShop(shopId);
+      setMessage(`Резерв сброшен: ${response.updated} позиций.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось сбросить резерв.");
     } finally {
       setBusy(false);
     }
@@ -411,6 +428,7 @@ function App() {
               addFlower={addFlower}
               saveFlower={saveFlower}
               hideFlower={hideFlower}
+              resetReserved={resetReserved}
               busy={busy}
             />
           ) : (
@@ -501,9 +519,10 @@ function FlowersView(props: {
   addFlower: () => Promise<void>;
   saveFlower: (flower: Flower) => Promise<void>;
   hideFlower: (flower: Flower) => Promise<void>;
+  resetReserved: () => Promise<void>;
   busy: boolean;
 }) {
-  const { draft, setDraft, flowers, editing, setEditing, addFlower, saveFlower, hideFlower, busy } = props;
+  const { draft, setDraft, flowers, editing, setEditing, addFlower, saveFlower, hideFlower, resetReserved, busy } = props;
 
   return (
     <>
@@ -516,6 +535,13 @@ function FlowersView(props: {
         <button className="primary addButton" onClick={() => void addFlower()} disabled={busy}>
           <PackagePlus size={17} />
           Добавить
+        </button>
+      </div>
+
+      <div className="bulkActions">
+        <button className="secondaryAction" onClick={() => void resetReserved()} disabled={busy}>
+          <RotateCcw size={16} />
+          Сбросить резерв
         </button>
       </div>
 
@@ -541,9 +567,9 @@ function FlowersView(props: {
                   <td><input value={row.name ?? ""} onChange={(event) => edit(flower.id, "name", event.target.value, setEditing)} /></td>
                   <td><input value={row.category ?? ""} onChange={(event) => edit(flower.id, "category", event.target.value, setEditing)} /></td>
                   <td><input value={row.color ?? ""} onChange={(event) => edit(flower.id, "color", event.target.value, setEditing)} /></td>
-                  <td><input type="number" value={row.price_per_stem ?? 0} onChange={(event) => edit(flower.id, "price_per_stem", Number(event.target.value), setEditing)} /></td>
-                  <td><input type="number" value={row.quantity_available ?? 0} onChange={(event) => edit(flower.id, "quantity_available", Number(event.target.value), setEditing)} /></td>
-                  <td><input type="number" value={row.quantity_reserved ?? 0} onChange={(event) => edit(flower.id, "quantity_reserved", Number(event.target.value), setEditing)} /></td>
+                  <td><input type="number" min={0} step={1} value={row.price_per_stem ?? 0} onChange={(event) => edit(flower.id, "price_per_stem", Number(event.target.value), setEditing)} /></td>
+                  <td><input type="number" min={0} step={1} value={row.quantity_available ?? 0} onChange={(event) => edit(flower.id, "quantity_available", Number(event.target.value), setEditing)} /></td>
+                  <td><input type="number" min={0} step={1} value={row.quantity_reserved ?? 0} onChange={(event) => edit(flower.id, "quantity_reserved", Number(event.target.value), setEditing)} /></td>
                   <td><span className="stock">{flower.quantity_free}</span></td>
                   <td className="actions">
                     <button className="iconButton" onClick={() => void saveFlower(flower)} disabled={busy} title="Сохранить">
@@ -670,7 +696,7 @@ function NumberInput(props: { label: string; value: number; onChange: (value: nu
   return (
     <label>
       <span>{props.label}</span>
-      <input type="number" value={props.value} onChange={(event) => props.onChange(Number(event.target.value))} />
+      <input type="number" min={0} step={1} value={props.value} onChange={(event) => props.onChange(Number(event.target.value))} />
     </label>
   );
 }

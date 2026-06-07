@@ -73,6 +73,27 @@ export class ApiError extends Error {
   }
 }
 
+function formatApiDetail(detail: unknown): string {
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const record = item as { loc?: unknown[]; msg?: string };
+          const field = Array.isArray(record.loc) ? record.loc.join(".") : "";
+          return [field, record.msg].filter(Boolean).join(": ");
+        }
+        return String(item);
+      })
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  return "Request failed";
+}
+
 function buildUrl(baseUrl: string, path: string) {
   return `${baseUrl.replace(/\/$/, "")}${path}`;
 }
@@ -96,7 +117,7 @@ async function request<T>(
     const body = await response.json().catch(() => null);
     const detail = body?.detail ?? response.statusText;
     throw new ApiError(
-      Array.isArray(detail) ? detail.join(", ") : detail,
+      formatApiDetail(detail),
       response.status,
     );
   }
@@ -132,6 +153,14 @@ export function createFlower(config: ApiConfig, shopId: number, payload: FlowerP
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function resetReservedFlowers(config: ApiConfig, shopId: number) {
+  return request<{ status: string; updated: number }>(
+    config,
+    `/admin/shops/${shopId}/flowers/reset-reserved`,
+    { method: "POST" },
+  );
 }
 
 export function updateFlower(

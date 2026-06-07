@@ -4,6 +4,40 @@ from itertools import combinations
 from app.db.models import Flower
 
 
+COLOR_ALIASES = {
+    "red": "red",
+    "красный": "red",
+    "красная": "red",
+    "красные": "red",
+    "красного": "red",
+    "pink": "pink",
+    "розовый": "pink",
+    "розовая": "pink",
+    "розовые": "pink",
+    "розового": "pink",
+    "white": "white",
+    "белый": "white",
+    "белая": "white",
+    "белые": "white",
+    "blue": "blue",
+    "синий": "blue",
+    "синяя": "blue",
+    "синие": "blue",
+    "голубой": "blue",
+    "purple": "purple",
+    "фиолетовый": "purple",
+    "фиолетовая": "purple",
+    "фиолетовые": "purple",
+    "lavender": "lavender",
+    "лавандовый": "lavender",
+    "лавандовая": "lavender",
+    "yellow": "yellow",
+    "желтый": "yellow",
+    "желтая": "yellow",
+    "желтые": "yellow",
+}
+
+
 def calculate_selected_flowers_price(
     selected_flowers: list[dict],
     flowers: list[Flower],
@@ -52,12 +86,25 @@ def build_bouquet_options(
     if not available_flowers:
         return []
 
-    preferred_colors = {color.strip().lower() for color in colors or [] if color}
+    preferred_colors = {
+        normalized_color
+        for color in colors or []
+        if (normalized_color := _normalize_color(color))
+    }
+    if preferred_colors:
+        available_flowers = [
+            flower
+            for flower in available_flowers
+            if _normalize_color(flower.color) in preferred_colors
+        ]
+        if not available_flowers:
+            return []
+
     sorted_flowers = sorted(
         available_flowers,
         key=lambda flower: (
             0
-            if preferred_colors and str(flower.color or "").lower() in preferred_colors
+            if preferred_colors and _normalize_color(flower.color) in preferred_colors
             else 1,
             Decimal(str(flower.price_per_stem)),
             flower.name,
@@ -88,7 +135,7 @@ def build_bouquet_options(
                 seen,
                 title=f"Монобукет: {flower.name}",
                 description=_build_description([flower], style),
-                selected_flowers=[{"name": flower.name, "quantity": quantity}],
+                selected_flowers=[_selection_item(flower, quantity)],
                 flowers=available_flowers,
                 budget=budget_decimal,
                 max_options=max_options,
@@ -150,7 +197,7 @@ def _build_mix_selection(
         if quantity < 3:
             return []
 
-        selected_flowers.append({"name": flower.name, "quantity": quantity})
+        selected_flowers.append(_selection_item(flower, quantity))
 
     return selected_flowers
 
@@ -192,7 +239,13 @@ def _append_option(
 
 def _build_description(flowers: list[Flower], style: str | None) -> str:
     colors = ", ".join(
-        sorted({_translate_color(str(flower.color)) for flower in flowers if flower.color})
+        sorted(
+            {
+                _translate_color(str(flower.color))
+                for flower in flowers
+                if flower.color
+            }
+        )
     )
     style_text = f" под стиль «{style}»" if style else ""
     if colors:
@@ -206,10 +259,38 @@ def _translate_color(color: str) -> str:
         "white": "белый",
         "pink": "розовый",
         "blue": "синий",
+        "purple": "фиолетовый",
         "lavender": "лавандовый",
         "yellow": "желтый",
     }
-    return colors.get(color.lower(), color)
+    normalized_color = _normalize_color(color) or color.lower()
+    return colors.get(normalized_color, color)
+
+
+def _selection_item(flower: Flower, quantity: int) -> dict:
+    return {
+        "name": flower.name,
+        "quantity": quantity,
+        "color": _normalize_color(flower.color) or flower.color,
+        "color_label": _translate_color(str(flower.color or "")) if flower.color else None,
+        "category": flower.category,
+    }
+
+
+def _normalize_color(color: object) -> str | None:
+    value = str(color or "").strip().lower()
+    if not value:
+        return None
+
+    cleaned = value.replace("ё", "е")
+    if cleaned in COLOR_ALIASES:
+        return COLOR_ALIASES[cleaned]
+
+    for alias, normalized in COLOR_ALIASES.items():
+        if alias in cleaned:
+            return normalized
+
+    return cleaned
 
 
 def _odd_quantity(quantity: int) -> int:

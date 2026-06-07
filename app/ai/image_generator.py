@@ -62,11 +62,14 @@ def generate_bouquet_image(*, shop_name: str, state: dict) -> bytes:
 
 
 def _build_bouquet_image_prompt(*, shop_name: str, state: dict) -> str:
-    flowers = ", ".join(
-        f"{item.get('name')} x{item.get('quantity')}"
-        for item in state.get("selected_flowers") or []
-    )
-    colors = ", ".join(state.get("colors") or []) or "harmonious florist palette"
+    selected_flowers = state.get("selected_flowers") or []
+    flowers = "; ".join(_format_flower_for_prompt(item) for item in selected_flowers)
+    selected_colors = [
+        _format_color_for_prompt(item)
+        for item in selected_flowers
+        if item.get("color_label") or item.get("color")
+    ]
+    colors = ", ".join(selected_colors or state.get("colors") or []) or "harmonious florist palette"
     style = state.get("style") or "modern elegant"
     occasion = state.get("occasion") or "flower gift"
     summary = state.get("summary") or "custom bouquet"
@@ -81,5 +84,25 @@ def _build_bouquet_image_prompt(*, shop_name: str, state: dict) -> str:
         f"Style: {style}. "
         f"Requested colors: {colors}. "
         f"Flower composition: {flowers}. "
+        "The flower composition is the source of truth; ignore any customer color that is not in the composition. "
+        "Strict color rule: every listed flower must use its listed color. "
+        "Do not add red, pink, white, or other colors unless they are explicitly listed in the composition. "
+        "If the composition says purple gypsophila, make the bouquet visibly purple/lavender, not red or pink. "
         "Make the bouquet visually balanced and plausible for the listed stems."
     )
+
+
+def _format_flower_for_prompt(item: dict) -> str:
+    name = item.get("name") or "flower"
+    quantity = item.get("quantity") or 0
+    color = _format_color_for_prompt(item)
+    category = item.get("category") or name
+    return f"{name} ({category}), color {color}, quantity {quantity}"
+
+
+def _format_color_for_prompt(item: dict) -> str:
+    color_label = item.get("color_label")
+    color_code = item.get("color")
+    if color_label and color_code and str(color_label).lower() != str(color_code).lower():
+        return f"{color_label} ({color_code})"
+    return str(color_label or color_code or "natural matching color")
