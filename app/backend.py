@@ -421,8 +421,9 @@ def admin_list_flowers(shop_id: int) -> list[dict[str, Any]]:
 @app.post("/admin/shops/{shop_id}/flowers", dependencies=[Depends(require_shop_access)])
 def admin_create_flower(shop_id: int, payload: FlowerCreate) -> dict[str, Any]:
     _require_shop(shop_id)
+    flower_data = _normalize_flower_payload(payload.model_dump())
     with SessionLocal() as session:
-        flower = Flower(shop_id=shop_id, **payload.model_dump())
+        flower = Flower(shop_id=shop_id, **flower_data)
         session.add(flower)
         session.commit()
         session.refresh(flower)
@@ -443,7 +444,9 @@ def admin_update_flower(flower_id: int, payload: FlowerUpdate) -> dict[str, Any]
         if flower is None:
             raise HTTPException(status_code=404, detail="Flower not found")
 
-        for key, value in payload.model_dump(exclude_unset=True).items():
+        for key, value in _normalize_flower_payload(
+            payload.model_dump(exclude_unset=True)
+        ).items():
             setattr(flower, key, value)
 
         if flower.quantity_reserved > flower.quantity_available:
@@ -550,6 +553,21 @@ def _require_shop(shop_id: int) -> Shop:
     if shop is None:
         raise HTTPException(status_code=404, detail="Shop not found")
     return shop
+
+
+def _normalize_flower_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    for key in ("name", "category", "color", "photo_url"):
+        if key not in normalized or normalized[key] is None:
+            continue
+
+        value = str(normalized[key]).strip()
+        normalized[key] = value or None
+
+    if "name" in normalized and normalized["name"] is None:
+        normalized["name"] = ""
+
+    return normalized
 
 
 def _flower_to_dict(flower: Flower) -> dict[str, Any]:

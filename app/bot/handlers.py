@@ -803,10 +803,7 @@ async def text_handler(message: Message) -> None:
             new_state["bouquet_options"] = []
             new_state["is_ready_for_confirmation"] = False
             show_manager_help_keyboard = True
-            ai_response.reply = (
-                "Не смог собрать варианты по указанным цветам и текущим свободным остаткам. "
-                "Попробуйте изменить цвета, увеличить бюджет или позовите менеджера."
-            )
+            ai_response.reply = _build_no_bouquet_options_message(new_state, flowers)
     else:
         new_state["is_ready_for_confirmation"] = False
         new_state["bouquet_options"] = []
@@ -1247,6 +1244,59 @@ def _build_bouquet_options_message(options: list[dict]) -> str:
             f"Цена: {float(option.get('estimated_price') or 0):.0f} ₽"
         )
     return "\n".join(lines)
+
+
+def _build_no_bouquet_options_message(state: dict, flowers: list) -> str:
+    budget = state.get("budget")
+    budget_text = (
+        f"{float(budget):.0f} руб."
+        if budget not in (None, "")
+        else "не указан"
+    )
+    colors = ", ".join(_display_color(color) for color in state.get("colors") or [])
+    colors_text = colors or "не указаны"
+    available_text = _format_available_flowers_brief(flowers)
+
+    return (
+        "Не смог собрать варианты по текущим условиям.\n"
+        f"Я понял бюджет: {budget_text}\n"
+        f"Цвета: {colors_text}\n"
+        f"Свободные цветы сейчас: {available_text}\n\n"
+        "Если бюджет или цвет распознались неверно, напишите одним сообщением: "
+        "бюджет 7000, цвет белый, стиль нежный. Либо позовите менеджера."
+    )
+
+
+def _format_available_flowers_brief(flowers: list, limit: int = 5) -> str:
+    items = []
+    for flower in flowers[:limit]:
+        free_quantity = int(flower.quantity_available or 0) - int(flower.quantity_reserved or 0)
+        items.append(
+            f"{flower.name.strip()} {_display_color(flower.color)} "
+            f"{free_quantity} шт. по {float(flower.price_per_stem):.0f} руб."
+        )
+
+    if not items:
+        return "нет активных свободных цветов"
+
+    if len(flowers) > limit:
+        items.append(f"еще {len(flowers) - limit} поз.")
+
+    return "; ".join(items)
+
+
+def _display_color(color: object) -> str:
+    labels = {
+        "red": "красный",
+        "white": "белый",
+        "pink": "розовый",
+        "blue": "синий",
+        "purple": "фиолетовый",
+        "lavender": "лавандовый",
+        "yellow": "желтый",
+    }
+    value = str(color or "").strip().lower()
+    return labels.get(value, value or "цвет не указан")
 
 
 def _build_selected_bouquet_message(option: dict) -> str:

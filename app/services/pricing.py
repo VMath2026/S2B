@@ -45,17 +45,30 @@ def calculate_selected_flowers_price(
     if not selected_flowers:
         return None
 
-    prices_by_name = {flower.name.lower(): flower.price_per_stem for flower in flowers}
+    prices_by_identity = {
+        _flower_identity(flower.name, flower.color): flower.price_per_stem
+        for flower in flowers
+    }
+    prices_by_name = {
+        str(flower.name or "").strip().lower(): flower.price_per_stem
+        for flower in flowers
+    }
     total = Decimal("0")
     matched_any = False
 
     for selected in selected_flowers:
         name = str(selected.get("name") or "").strip().lower()
         quantity = selected.get("quantity") or 0
-        if not name or name not in prices_by_name:
+        if not name:
             continue
 
-        total += Decimal(str(prices_by_name[name])) * Decimal(str(quantity))
+        price = prices_by_identity.get(
+            _flower_identity(selected.get("name"), selected.get("color"))
+        ) or prices_by_name.get(name)
+        if price is None:
+            continue
+
+        total += Decimal(str(price)) * Decimal(str(quantity))
         matched_any = True
 
     if not matched_any:
@@ -133,7 +146,7 @@ def build_bouquet_options(
             _append_option(
                 options,
                 seen,
-                title=f"Монобукет: {flower.name}",
+                title=f"Монобукет: {_flower_display_name(flower)}",
                 description=_build_description([flower], style),
                 selected_flowers=[_selection_item(flower, quantity)],
                 flowers=available_flowers,
@@ -153,7 +166,7 @@ def build_bouquet_options(
         _append_option(
             options,
             seen,
-            title=f"Микс: {first.name} + {second.name}",
+            title=f"Микс: {_flower_display_name(first)} + {_flower_display_name(second)}",
             description=_build_description([first, second], style),
             selected_flowers=selected_flowers,
             flowers=available_flowers,
@@ -173,7 +186,12 @@ def build_bouquet_options(
         _append_option(
             options,
             seen,
-            title=f"Сборный букет: {first.name} + {second.name} + {third.name}",
+            title=(
+                "Сборный букет: "
+                f"{_flower_display_name(first)} + "
+                f"{_flower_display_name(second)} + "
+                f"{_flower_display_name(third)}"
+            ),
             description=_build_description([first, second, third], style),
             selected_flowers=selected_flowers,
             flowers=available_flowers,
@@ -221,7 +239,14 @@ def _append_option(
         return
 
     signature = tuple(
-        sorted((str(item["name"]), int(item["quantity"])) for item in selected_flowers)
+        sorted(
+            (
+                str(item["name"]).strip().lower(),
+                str(item.get("color") or "").strip().lower(),
+                int(item["quantity"]),
+            )
+            for item in selected_flowers
+        )
     )
     if signature in seen:
         return
@@ -269,12 +294,23 @@ def _translate_color(color: str) -> str:
 
 def _selection_item(flower: Flower, quantity: int) -> dict:
     return {
-        "name": flower.name,
+        "name": str(flower.name or "").strip(),
         "quantity": quantity,
         "color": _normalize_color(flower.color) or flower.color,
         "color_label": _translate_color(str(flower.color or "")) if flower.color else None,
-        "category": flower.category,
+        "category": str(flower.category or "").strip() or None,
     }
+
+
+def _flower_display_name(flower: Flower) -> str:
+    return str(flower.name or "").strip()
+
+
+def _flower_identity(name: object, color: object) -> tuple[str, str]:
+    return (
+        str(name or "").strip().lower(),
+        _normalize_color(color) or "",
+    )
 
 
 def _normalize_color(color: object) -> str | None:

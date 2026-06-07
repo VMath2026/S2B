@@ -135,7 +135,7 @@ def _merge_missing_state_values(state: dict, hints: dict) -> dict:
             merged["colors"] = _dedupe_list(value)
             continue
 
-        if value not in (None, "", []) and not merged.get(key):
+        if value not in (None, "", []):
             merged[key] = value
     return merged
 

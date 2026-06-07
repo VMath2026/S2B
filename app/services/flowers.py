@@ -34,17 +34,30 @@ def reserve_selected_flowers(shop_id: int, selected_flowers: list[dict]) -> list
                 )
             ).all()
         )
-        flowers_by_name = {flower.name.lower(): flower for flower in flowers}
+        flowers_by_identity = {
+            _flower_identity(flower.name, flower.color): flower for flower in flowers
+        }
+        flowers_by_name: dict[str, list[Flower]] = {}
+        for flower in flowers:
+            flowers_by_name.setdefault(
+                str(flower.name or "").strip().lower(),
+                [],
+            ).append(flower)
 
         for selected in selected_flowers:
             name = str(selected.get("name") or "").strip()
+            color = selected.get("color")
             quantity = int(selected.get("quantity") or 0)
             if not name or quantity <= 0:
                 continue
 
-            flower = flowers_by_name.get(name.lower())
+            flower = flowers_by_identity.get(_flower_identity(name, color))
+            same_name_flowers = flowers_by_name.get(name.lower(), [])
+            if flower is None and len(same_name_flowers) == 1:
+                flower = same_name_flowers[0]
+
             if flower is None:
-                unavailable.append(name)
+                unavailable.append(f"{name} нужно уточнить цвет")
                 continue
 
             free_quantity = flower.quantity_available - flower.quantity_reserved
@@ -60,6 +73,13 @@ def reserve_selected_flowers(shop_id: int, selected_flowers: list[dict]) -> list
 
         session.commit()
         return []
+
+
+def _flower_identity(name: object, color: object) -> tuple[str, str]:
+    return (
+        str(name or "").strip().lower(),
+        str(color or "").strip().lower(),
+    )
 
 
 def reset_reserved_flowers_for_shop(shop_id: int) -> int:
