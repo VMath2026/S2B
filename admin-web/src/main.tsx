@@ -16,10 +16,12 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  ApiError,
   createFlower,
   deactivateFlower,
   Flower,
   FlowerPayload,
+  getMe,
   getSettings,
   listFlowers,
   listShops,
@@ -131,6 +133,7 @@ function App() {
         username: "owner",
         adminKey,
       };
+      await getMe(sessionToConfig(nextSession)!);
       saveSession(nextSession);
       setSession(nextSession);
       await loadAll(nextSession);
@@ -158,15 +161,17 @@ function App() {
     setBusy(true);
     setMessage("");
     try {
+      const activeConfig = sessionToConfig(activeSession);
+      if (!activeConfig) return;
+
+      await getMe(activeConfig);
+
       if (activeSession.role === "shop" && activeSession.shop) {
         setShops([activeSession.shop]);
         setShopId(activeSession.shop.id);
         await reloadShop(activeSession.shop.id, activeSession);
         return;
       }
-
-      const activeConfig = sessionToConfig(activeSession);
-      if (!activeConfig) return;
 
       const loadedShops = await listShops(activeConfig);
       setShops(loadedShops);
@@ -177,6 +182,7 @@ function App() {
         await reloadShop(nextShopId, activeSession);
       }
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось загрузить данные.");
     } finally {
       setBusy(false);
@@ -201,6 +207,7 @@ function App() {
         password: current.password,
       }));
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось обновить магазин.");
     } finally {
       setBusy(false);
@@ -221,6 +228,7 @@ function App() {
       await reloadShop(shopId);
       setMessage("Товар добавлен.");
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось добавить товар.");
     } finally {
       setBusy(false);
@@ -240,6 +248,7 @@ function App() {
       await reloadShop(shopId);
       setMessage("Товар сохранен.");
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось сохранить товар.");
     } finally {
       setBusy(false);
@@ -254,6 +263,7 @@ function App() {
       await reloadShop(shopId);
       setMessage("Товар скрыт из подбора.");
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось скрыть товар.");
     } finally {
       setBusy(false);
@@ -277,6 +287,7 @@ function App() {
       await reloadShop(shopId);
       setMessage("Настройки сохранены.");
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось сохранить настройки.");
     } finally {
       setBusy(false);
@@ -296,10 +307,20 @@ function App() {
       setCredentialsDraft({ username: response.username, password: "" });
       setMessage(`Доступ для магазина сохранен: ${response.username}`);
     } catch (error) {
+      if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось сохранить доступ магазина.");
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleAuthError(error: unknown) {
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      logout();
+      setMessage("Доступ устарел или ключ неверный. Войдите заново.");
+      return true;
+    }
+    return false;
   }
 
   if (!session) {

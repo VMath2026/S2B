@@ -40,6 +40,12 @@ export type LoginResponse = {
   username: string;
 };
 
+export type AdminMe = {
+  role: "owner" | "shop";
+  shop: Shop | null;
+  username: string;
+};
+
 export type FlowerPayload = {
   name: string;
   category?: string | null;
@@ -56,6 +62,16 @@ type ApiConfig = {
   adminKey?: string;
   token?: string;
 };
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 function buildUrl(baseUrl: string, path: string) {
   return `${baseUrl.replace(/\/$/, "")}${path}`;
@@ -79,7 +95,10 @@ async function request<T>(
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const detail = body?.detail ?? response.statusText;
-    throw new Error(Array.isArray(detail) ? detail.join(", ") : detail);
+    throw new ApiError(
+      Array.isArray(detail) ? detail.join(", ") : detail,
+      response.status,
+    );
   }
 
   return response.json() as Promise<T>;
@@ -94,6 +113,10 @@ export function loginShop(baseUrl: string, username: string, password: string) {
       body: JSON.stringify({ username, password }),
     },
   );
+}
+
+export function getMe(config: ApiConfig) {
+  return request<AdminMe>(config, "/admin/me");
 }
 
 export function listShops(config: ApiConfig) {

@@ -215,8 +215,14 @@ def admin_me(
     x_admin_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    if x_admin_key is not None and not settings.admin_api_key:
+        raise HTTPException(status_code=503, detail="ADMIN_API_KEY is not configured")
+
     if settings.admin_api_key and x_admin_key == settings.admin_api_key:
         return {"role": "owner", "shop": None, "username": "owner"}
+
+    if x_admin_key is not None:
+        raise HTTPException(status_code=401, detail="Invalid admin key")
 
     identity = verify_shop_admin_token(authorization)
     if identity is None:
@@ -306,8 +312,14 @@ def _ensure_can_access_shop(
     x_admin_key: str | None,
     authorization: str | None,
 ) -> ShopAdminIdentity | None:
+    if x_admin_key is not None and not settings.admin_api_key:
+        raise HTTPException(status_code=503, detail="ADMIN_API_KEY is not configured")
+
     if settings.admin_api_key and x_admin_key == settings.admin_api_key:
         return None
+
+    if x_admin_key is not None:
+        raise HTTPException(status_code=401, detail="Invalid admin key")
 
     identity = verify_shop_admin_token(authorization)
     if identity is None:
