@@ -18,6 +18,7 @@ DEFAULT_ORDER_STATE = {
     "phone": None,
     "comment": None,
     "selected_flowers": [],
+    "bouquet_options": [],
     "estimated_price": None,
     "summary": None,
     "is_ready_for_confirmation": False,

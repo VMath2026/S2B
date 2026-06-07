@@ -27,6 +27,7 @@ class ParsedOrderState(BaseModel):
     phone: str | None = None
     comment: str | None = None
     selected_flowers: list[dict] = Field(default_factory=list)
+    bouquet_options: list[dict] = Field(default_factory=list)
     estimated_price: float | None = None
     summary: str | None = None
     is_ready_for_confirmation: bool = False
@@ -55,9 +56,13 @@ def parse_order_message(
     current_state: dict,
     user_message: str,
 ) -> AIOrderResponse:
+    text_hints = _extract_text_hints(user_message)
+
     if _looks_like_obvious_nonsense(user_message):
         return AIOrderResponse(
-            state=ParsedOrderState.model_validate(_normalize_state(current_state)),
+            state=ParsedOrderState.model_validate(
+                _merge_missing_state_values(_normalize_state(current_state), text_hints)
+            ),
             reply=(
                 "Я не совсем понял запрос про букет. Напишите, пожалуйста, одним сообщением: "
                 "для кого букет, повод, бюджет, стиль или цвета, дату, адрес доставки и телефон."
@@ -82,6 +87,7 @@ def parse_order_message(
             "content": json.dumps(
                 {
                     "current_state": _normalize_state(current_state),
+                    "detected_hints": text_hints,
                     "message": user_message,
                 },
                 ensure_ascii=False,
@@ -94,7 +100,7 @@ def parse_order_message(
             model=settings.openai_model,
             messages=messages,
             response_format={"type": "json_object"},
-            max_completion_tokens=700,
+            max_completion_tokens=1100,
         )
     except Exception as exc:
         raise AIUnavailableError(f"OpenAI request failed: {exc}") from exc
@@ -104,7 +110,14 @@ def parse_order_message(
         raise AIUnavailableError("OpenAI returned an empty response.")
 
     try:
-        return AIOrderResponse.model_validate_json(content)
+        ai_response = AIOrderResponse.model_validate_json(content)
+        merged_state = _merge_missing_state_values(
+            ai_response.state.model_dump(),
+            text_hints,
+        )
+        return ai_response.model_copy(
+            update={"state": ParsedOrderState.model_validate(merged_state)}
+        )
     except ValidationError as exc:
         raise AIUnavailableError(f"OpenAI returned invalid JSON: {exc}") from exc
 
@@ -113,6 +126,101 @@ def _normalize_state(state: dict) -> dict:
     normalized = dict(DEFAULT_ORDER_STATE)
     normalized.update(state or {})
     return _json_safe(normalized)
+
+
+def _merge_missing_state_values(state: dict, hints: dict) -> dict:
+    merged = dict(state)
+    for key, value in hints.items():
+        if key == "colors":
+            existing_colors = [str(color).lower() for color in merged.get("colors") or []]
+            merged["colors"] = list(merged.get("colors") or [])
+            for color in value:
+                if str(color).lower() not in existing_colors:
+                    merged["colors"].append(color)
+            continue
+
+        if value not in (None, "", []) and not merged.get(key):
+            merged[key] = value
+    return merged
+
+
+def _extract_text_hints(message: str) -> dict:
+    text = message.strip()
+    normalized = text.lower()
+    hints: dict[str, Any] = {}
+
+    phone_match = re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", text)
+    if phone_match:
+        hints["phone"] = re.sub(r"[^\d+]", "", phone_match.group(0))
+
+    budget_match = re.search(
+        r"(?:до|бюджет|на|примерно)?\s*(\d+(?:[.,]\d+)?)\s*(тыс|тысяч|к|k)?",
+        normalized,
+    )
+    if budget_match and any(
+        word in normalized for word in ("бюджет", "руб", "тыс", "тысяч", "₽")
+    ):
+        amount = float(budget_match.group(1).replace(",", "."))
+        if budget_match.group(2):
+            amount *= 1000
+        hints["budget"] = amount
+
+    if "завтра" in normalized:
+        hints["delivery_date"] = "завтра"
+    elif "сегодня" in normalized:
+        hints["delivery_date"] = "сегодня"
+
+    if re.search(r"\b(маме|мама|мамы|матери)\b", normalized):
+        hints["recipient"] = "мама"
+    elif re.search(r"\b(жене|жена|девушке|девушка)\b", normalized):
+        hints["recipient"] = "жена/девушка"
+
+    if "день рождения" in normalized or re.search(r"\bдр\b", normalized):
+        hints["occasion"] = "день рождения"
+
+    style_words = {
+        "нежн": "нежный",
+        "ярк": "яркий",
+        "романтич": "романтичный",
+        "классич": "классический",
+        "минимал": "минималистичный",
+    }
+    for marker, style in style_words.items():
+        if marker in normalized:
+            hints["style"] = style
+            break
+
+    color_words = {
+        "красн": "red",
+        "син": "blue",
+        "бел": "white",
+        "розов": "pink",
+        "желт": "yellow",
+        "фиолет": "lavender",
+        "лаванд": "lavender",
+    }
+    colors = [
+        color
+        for marker, color in color_words.items()
+        if marker in normalized
+    ]
+    if colors:
+        hints["colors"] = colors
+
+    address_match = re.search(
+        r"(?:адрес|доставк[аиу]?)\s+(.+?)(?:\s+(?:телефон|тел|номер|\+?\d[\d\s().-]{7,}\d)|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if address_match:
+        hints["delivery_address"] = re.sub(
+            r"\s+и$",
+            "",
+            address_match.group(1).strip(" ,.;"),
+            flags=re.IGNORECASE,
+        )
+
+    return hints
 
 
 def _looks_like_obvious_nonsense(message: str) -> bool:

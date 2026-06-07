@@ -15,7 +15,7 @@ from app.services.conversations import (
 from app.services.customers import get_or_create_customer
 from app.services.flowers import get_active_flowers_for_shop, reserve_selected_flowers
 from app.services.orders import create_confirmed_order, update_order_status
-from app.services.pricing import calculate_selected_flowers_price
+from app.services.pricing import build_bouquet_options, calculate_selected_flowers_price
 from app.services.shops import (
     get_active_shops_by_city,
     get_current_shop_for_user,
@@ -175,6 +175,48 @@ async def change_order_callback(callback: CallbackQuery) -> None:
         )
 
 
+@router.callback_query(F.data.startswith("select_bouquet:"))
+async def select_bouquet_callback(callback: CallbackQuery) -> None:
+    shop = get_current_shop_for_user(callback.from_user.id)
+    if shop is None:
+        await callback.answer("Сначала выберите магазин.", show_alert=True)
+        return
+
+    customer = get_or_create_customer(
+        shop_id=shop.id,
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+    )
+    state = get_or_create_conversation_state(shop.id, customer.id)
+    options = state.get("bouquet_options") or []
+
+    try:
+        option_index = int((callback.data or "").split(":", maxsplit=1)[1])
+        if option_index < 0:
+            raise IndexError
+        option = options[option_index]
+    except (IndexError, ValueError):
+        await callback.answer("Этот вариант уже недоступен. Напишите /reset.", show_alert=True)
+        return
+
+    new_state = {
+        **state,
+        "selected_flowers": option.get("selected_flowers") or [],
+        "estimated_price": option.get("estimated_price"),
+        "summary": option.get("title"),
+        "is_ready_for_confirmation": True,
+    }
+    update_conversation_state(shop.id, customer.id, new_state)
+
+    await callback.answer("Вариант выбран.")
+    if callback.message is not None:
+        await callback.message.answer(
+            _build_selected_bouquet_message(option),
+            reply_markup=_customer_order_keyboard(),
+        )
+
+
 @router.callback_query(F.data == "reset_order")
 async def reset_order_callback(callback: CallbackQuery) -> None:
     shop = get_current_shop_for_user(callback.from_user.id)
@@ -277,17 +319,33 @@ async def text_handler(message: Message) -> None:
     new_state = ai_response.state.model_dump()
     new_state["ai_requests_used"] = ai_requests_used + 1
 
-    calculated_price = calculate_selected_flowers_price(
-        new_state.get("selected_flowers") or [],
-        flowers,
-    )
-    if calculated_price is not None:
-        new_state["estimated_price"] = float(calculated_price)
-        ai_response.reply = _append_price_confirmation(
-            ai_response.reply,
-            calculated_price,
-            bool(new_state.get("is_ready_for_confirmation")),
+    if _has_enough_details_for_options(new_state):
+        options = build_bouquet_options(
+            flowers=flowers,
+            budget=new_state.get("budget"),
+            colors=new_state.get("colors") or [],
+            style=new_state.get("style"),
         )
+        if options:
+            new_state["bouquet_options"] = options
+            new_state["selected_flowers"] = []
+            new_state["estimated_price"] = None
+            new_state["is_ready_for_confirmation"] = False
+            ai_response.reply = _build_bouquet_options_message(options)
+        else:
+            new_state["bouquet_options"] = []
+            new_state["is_ready_for_confirmation"] = False
+            ai_response.reply += (
+                "\n\nНе смог собрать варианты в этот бюджет по текущим остаткам. "
+                "Попробуйте увеличить бюджет или изменить пожелания."
+            )
+    else:
+        calculated_price = calculate_selected_flowers_price(
+            new_state.get("selected_flowers") or [],
+            flowers,
+        )
+        if calculated_price is not None:
+            new_state["estimated_price"] = float(calculated_price)
 
     update_conversation_state(
         shop_id=shop.id,
@@ -298,7 +356,9 @@ async def text_handler(message: Message) -> None:
     await message.answer(
         ai_response.reply,
         reply_markup=(
-            _customer_order_keyboard()
+            _bouquet_options_keyboard(new_state.get("bouquet_options") or [])
+            if new_state.get("bouquet_options")
+            else _customer_order_keyboard()
             if new_state.get("is_ready_for_confirmation")
             else None
         ),
@@ -427,6 +487,65 @@ def _append_price_confirmation(
     if "стоим" in reply.lower() or "руб" in reply.lower():
         return reply
     return reply + price_text
+
+
+def _has_enough_details_for_options(state: dict) -> bool:
+    required_fields = ["recipient", "occasion", "budget", "style", "delivery_date", "phone"]
+    return all(state.get(field) for field in required_fields)
+
+
+def _build_bouquet_options_message(options: list[dict]) -> str:
+    lines = ["Подобрал варианты в ваш бюджет. Выберите подходящий букет кнопкой ниже:"]
+    for index, option in enumerate(options, start=1):
+        flowers = ", ".join(
+            f"{item.get('name')} x{item.get('quantity')}"
+            for item in option.get("selected_flowers", [])
+        )
+        lines.append(
+            f"\n{index}. {option.get('title')}\n"
+            f"{flowers}\n"
+            f"{option.get('description')}\n"
+            f"Цена: {float(option.get('estimated_price') or 0):.0f} ₽"
+        )
+    return "\n".join(lines)
+
+
+def _build_selected_bouquet_message(option: dict) -> str:
+    flowers = ", ".join(
+        f"{item.get('name')} x{item.get('quantity')}"
+        for item in option.get("selected_flowers", [])
+    )
+    return (
+        f"Вы выбрали: {option.get('title')}\n"
+        f"Состав: {flowers}\n"
+        f"Примерная стоимость: {float(option.get('estimated_price') or 0):.0f} ₽\n\n"
+        "Подтвердить заказ?"
+    )
+
+
+def _bouquet_options_keyboard(options: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"Выбрать вариант {index}",
+                callback_data=f"select_bouquet:{index - 1}",
+            )
+        ]
+        for index, _option in enumerate(options, start=1)
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Изменить пожелания",
+                callback_data="change_order",
+            ),
+            InlineKeyboardButton(
+                text="Начать заново",
+                callback_data="reset_order",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_manager_order_message(order_id: int, shop_name: str, state: dict) -> str:
