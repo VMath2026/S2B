@@ -1,9 +1,6 @@
 import asyncio
 import logging
-import re
-from datetime import datetime, timedelta
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -33,6 +30,7 @@ from app.services.orders import (
     update_order_payment_status,
     update_order_status,
 )
+from app.services.order_validation import validate_order_state
 from app.services.pricing import build_bouquet_options, calculate_selected_flowers_price
 from app.services.shops import (
     clear_current_shop_for_user,
@@ -633,7 +631,17 @@ async def text_handler(message: Message) -> None:
     new_state = ai_response.state.model_dump()
     new_state["ai_requests_used"] = ai_requests_used + 1
 
-    if _has_enough_details_for_options(new_state):
+    should_validate = ai_response.message_kind not in {"irrelevant", "unsafe"}
+    validation = None
+    if should_validate:
+        validation = validate_order_state(
+            new_state,
+            min_order_price=shop_settings.min_order_price if shop_settings else None,
+            timezone=shop.timezone,
+        )
+        new_state = validation.state
+
+    if validation is not None and validation.is_ready_for_options:
         options = build_bouquet_options(
             flowers=flowers,
             budget=new_state.get("budget"),
@@ -655,6 +663,9 @@ async def text_handler(message: Message) -> None:
             )
     else:
         new_state["is_ready_for_confirmation"] = False
+        new_state["bouquet_options"] = []
+        if validation is not None and validation.errors:
+            ai_response.reply = _build_validation_message(validation.errors)
         calculated_price = calculate_selected_flowers_price(
             new_state.get("selected_flowers") or [],
             flowers,
@@ -903,13 +914,25 @@ async def _submit_order(
         )
         return
 
-    state = {
-        **state,
-        "delivery_date": _normalize_relative_delivery_date(
-            state.get("delivery_date"),
-            getattr(shop, "timezone", None),
-        ),
-    }
+    shop_settings = get_shop_settings(shop.id)
+    validation = validate_order_state(
+        state,
+        min_order_price=shop_settings.min_order_price if shop_settings else None,
+        timezone=getattr(shop, "timezone", None),
+    )
+    if validation.errors:
+        update_conversation_state(
+            shop_id=shop.id,
+            customer_id=customer_id,
+            state={**validation.state, "is_ready_for_confirmation": False},
+        )
+        await message.answer(
+            _build_validation_message(validation.errors),
+            reply_markup=_manager_help_keyboard(),
+        )
+        return
+
+    state = validation.state
 
     unavailable = reserve_selected_flowers(
         shop_id=shop.id,
@@ -1035,56 +1058,14 @@ def _append_price_confirmation(
     return reply + price_text
 
 
-def _has_enough_details_for_options(state: dict) -> bool:
-    required_fields = [
-        "recipient",
-        "occasion",
-        "budget",
-        "style",
-        "delivery_date",
-        "delivery_address",
-    ]
-    return all(state.get(field) for field in required_fields) and _looks_like_phone(
-        state.get("phone")
+def _build_validation_message(errors: list[str]) -> str:
+    return (
+        "Чтобы корректно оформить заказ, уточните: "
+        + ", ".join(errors)
+        + ".\n\n"
+        "Можно одним сообщением, например: букет для мамы, день рождения, бюджет 5000, "
+        "нежный стиль, завтра, Абая 21, +77015064262."
     )
-
-
-def _looks_like_phone(value: object) -> bool:
-    digits = "".join(char for char in str(value or "") if char.isdigit())
-    return len(digits) >= 10
-
-
-def _normalize_relative_delivery_date(value: object, timezone: str | None) -> str | None:
-    if value in (None, ""):
-        return None
-
-    text = str(value).strip()
-    lower_text = text.lower()
-    if _contains_calendar_date(text):
-        return text
-
-    try:
-        today = datetime.now(ZoneInfo(timezone or "Europe/Moscow")).date()
-    except Exception:
-        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-
-    offset_days: int | None = None
-    if "послезавтра" in lower_text:
-        offset_days = 2
-    elif "завтра" in lower_text:
-        offset_days = 1
-    elif "сегодня" in lower_text:
-        offset_days = 0
-
-    if offset_days is None:
-        return text
-
-    exact_date = today + timedelta(days=offset_days)
-    return f"{text} ({exact_date.strftime('%d.%m.%Y')})"
-
-
-def _contains_calendar_date(value: str) -> bool:
-    return bool(re.search(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b", value))
 
 
 def _build_bouquet_options_message(options: list[dict]) -> str:

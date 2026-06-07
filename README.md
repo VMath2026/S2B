@@ -11,6 +11,7 @@ Multi-tenant Telegram/AI platform for flower shops.
 - Customer confirms the order.
 - Order is saved and sent to the shop manager Telegram group.
 - Customer can pay the order through Telegram Payments when configured.
+- Bot validates delivery date, phone, budget, and address before creating orders.
 
 ## Stack
 
@@ -101,6 +102,10 @@ https://your-render-service.onrender.com/health
 The root URL should return service info. Telegram updates are received at
 `/telegram/webhook`; the app registers this webhook automatically on startup when
 `BOT_TOKEN` and `APP_BASE_URL` are set.
+
+Supported delivery date examples in Telegram: `сегодня`, `завтра`,
+`послезавтра`, `пятница`, `12.06`, `12.06.2026`, `2026-06-12`, `12 июня`.
+Impossible dates and dates in the past are rejected.
 
 To send every new order to a manager Telegram group, add the bot to that group,
 send `/chat_id` in the group, then put the returned numeric chat id into
