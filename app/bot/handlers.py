@@ -18,6 +18,7 @@ from app.services.flowers import get_active_flowers_for_shop, reserve_selected_f
 from app.services.orders import create_confirmed_order, update_order_status
 from app.services.pricing import build_bouquet_options, calculate_selected_flowers_price
 from app.services.shops import (
+    clear_current_shop_for_user,
     get_active_shops_by_city,
     get_current_shop_for_user,
     get_shop_by_id,
@@ -46,6 +47,8 @@ async def start_handler(message: Message, command: CommandObject) -> None:
     slug = command.args.strip() if command.args else None
 
     if not slug:
+        clear_current_shop_for_user(telegram_user_id)
+        pending_shop_options.pop(telegram_user_id, None)
         await message.answer(
             "Здравствуйте! Напишите город, и я покажу доступные цветочные магазины.\n\n"
             "Например: Москва или Санкт-Петербург."
@@ -126,6 +129,64 @@ async def reset_handler(message: Message) -> None:
     )
 
 
+@router.message(Command("new_order"))
+async def new_order_handler(message: Message) -> None:
+    await reset_handler(message)
+
+
+@router.message(Command("change_shop"))
+async def change_shop_handler(message: Message) -> None:
+    if not _is_private_message(message):
+        return
+
+    if message.from_user is None:
+        return
+
+    clear_current_shop_for_user(message.from_user.id)
+    pending_shop_options.pop(message.from_user.id, None)
+    await message.answer(
+        "Ок, выберем другой магазин. Напишите город, и я покажу доступные варианты."
+    )
+
+
+@router.message(Command("help"))
+async def help_handler(message: Message) -> None:
+    if not _is_private_message(message):
+        return
+
+    await message.answer(
+        "Команды:\n"
+        "/new_order — создать новый заказ в текущем магазине\n"
+        "/change_shop — выбрать другой магазин\n"
+        "/manager — позвать менеджера\n"
+        "/reset — сбросить текущий заказ\n"
+        "/ping — проверить, что бот отвечает"
+    )
+
+
+@router.message(Command("manager"))
+async def manager_handler(message: Message) -> None:
+    if not _is_private_message(message):
+        return
+
+    if message.from_user is None:
+        return
+
+    shop = get_current_shop_for_user(message.from_user.id)
+    if shop is None:
+        await message.answer("Сначала выберите магазин: напишите /start.")
+        return
+
+    customer = get_or_create_customer(
+        shop_id=shop.id,
+        telegram_user_id=message.from_user.id,
+        telegram_username=message.from_user.username,
+        first_name=message.from_user.first_name,
+    )
+    state = get_or_create_conversation_state(shop.id, customer.id)
+    await _request_manager_help(message, shop, customer.id, state)
+
+
 @router.message(Command("ping"))
 async def ping_handler(message: Message) -> None:
     if not _is_private_message(message):
@@ -196,6 +257,29 @@ async def change_order_callback(callback: CallbackQuery) -> None:
         await callback.message.answer(
             "Напишите одним сообщением, что нужно изменить: состав букета, бюджет, дату, адрес или телефон."
         )
+
+
+@router.callback_query(F.data == "call_manager")
+async def call_manager_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
+    shop = get_current_shop_for_user(callback.from_user.id)
+    if shop is None:
+        await callback.answer("Сначала выберите магазин.", show_alert=True)
+        return
+
+    customer = get_or_create_customer(
+        shop_id=shop.id,
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+    )
+    state = get_or_create_conversation_state(shop.id, customer.id)
+    await callback.answer()
+    if callback.message is not None:
+        await _request_manager_help(callback.message, shop, customer.id, state)
 
 
 @router.callback_query(F.data.startswith("select_bouquet:"))
@@ -315,7 +399,8 @@ async def text_handler(message: Message) -> None:
 
     if state.get("order_submitted"):
         await message.answer(
-            "Заказ уже передан менеджеру. Если хотите оформить новый заказ, напишите /reset."
+            "Заказ уже передан менеджеру. Если хотите оформить новый заказ, напишите /new_order. "
+            "Если нужен другой магазин, напишите /change_shop."
         )
         return
 
@@ -323,8 +408,9 @@ async def text_handler(message: Message) -> None:
     if ai_requests_used >= MAX_AI_REQUESTS_PER_ORDER:
         await message.answer(
             "Чтобы не тратить лишние запросы, я остановлю уточнения. "
-            "Если данные верны, ответьте «Да» для передачи менеджеру. "
-            "Если нужно начать заново, напишите /reset."
+            "Если не получается договориться с ботом, позовите менеджера. "
+            "Если нужно начать заново, напишите /new_order.",
+            reply_markup=_manager_help_keyboard(),
         )
         return
 
@@ -346,7 +432,8 @@ async def text_handler(message: Message) -> None:
             "Я пока не могу подключиться к ИИ, но магазин уже выбран.\n\n"
             f"Вы общаетесь с магазином «{shop.name}». "
             "Напишите одним сообщением: для кого букет, повод, бюджет, "
-            "стиль или цвета, дату, адрес доставки и телефон."
+            "стиль или цвета, дату, адрес доставки и телефон.",
+            reply_markup=_manager_help_keyboard(),
         )
         return
 
@@ -394,6 +481,8 @@ async def text_handler(message: Message) -> None:
             if new_state.get("bouquet_options")
             else _customer_order_keyboard()
             if new_state.get("is_ready_for_confirmation")
+            else _manager_help_keyboard()
+            if int(new_state.get("ai_requests_used") or 0) >= MAX_AI_REQUESTS_PER_ORDER
             else None
         ),
     )
@@ -471,6 +560,88 @@ def _is_private_callback(callback: CallbackQuery) -> bool:
     return getattr(chat_type, "value", chat_type) == "private"
 
 
+async def _request_manager_help(
+    message: Message,
+    shop,
+    customer_id: int,
+    state: dict,
+) -> None:
+    if state.get("manager_requested"):
+        await message.answer(
+            "Я уже отправил заявку менеджеру. Он свяжется с вами, как только увидит сообщение."
+        )
+        return
+
+    manager_chat_id = _get_manager_chat_id(shop.id)
+    if not manager_chat_id:
+        await message.answer(
+            "Пока не настроен чат менеджеров. Напишите /new_order, чтобы начать заново, "
+            "или попробуйте уточнить заказ еще раз."
+        )
+        return
+
+    try:
+        await message.bot.send_message(
+            manager_chat_id,
+            _build_manager_help_message(message, shop.name, state),
+        )
+    except Exception:
+        logger.exception("Failed to request manager help")
+        await message.answer(
+            "Не смог отправить сообщение менеджеру. Попробуйте еще раз чуть позже."
+        )
+        return
+
+    update_conversation_state(
+        shop_id=shop.id,
+        customer_id=customer_id,
+        state={**state, "manager_requested": True},
+    )
+    await message.answer(
+        "Позвал менеджера и передал ему текущие детали заказа. "
+        "Он свяжется с вами, чтобы договориться вручную."
+    )
+
+
+def _get_manager_chat_id(shop_id: int) -> int | None:
+    shop_settings = get_shop_settings(shop_id)
+    if shop_settings and shop_settings.manager_chat_id:
+        return shop_settings.manager_chat_id
+    return settings.default_manager_chat_id
+
+
+def _build_manager_help_message(message: Message, shop_name: str, state: dict) -> str:
+    flowers = state.get("selected_flowers") or []
+    flowers_text = ", ".join(
+        f"{item.get('name')} x{item.get('quantity')}" for item in flowers
+    ) or "еще не выбран"
+
+    username = (
+        f"@{message.from_user.username}"
+        if message.from_user and message.from_user.username
+        else "не указан"
+    )
+    user_id = message.from_user.id if message.from_user else "не указан"
+    first_name = message.from_user.first_name if message.from_user else "не указано"
+
+    return (
+        "Клиент просит менеджера\n"
+        f"Магазин: {shop_name}\n"
+        f"Клиент: {first_name}, {username}, id {user_id}\n"
+        f"Для кого: {_display_value(state.get('recipient'))}\n"
+        f"Повод: {_display_value(state.get('occasion'))}\n"
+        f"Бюджет: {_display_value(state.get('budget'))}\n"
+        f"Стиль: {_display_value(state.get('style'))}\n"
+        f"Цвета: {', '.join(state.get('colors') or []) or 'не указаны'}\n"
+        f"Выбранный букет: {flowers_text}\n"
+        f"Цена: {_display_value(state.get('estimated_price'))}\n"
+        f"Дата: {_display_value(state.get('delivery_date'))}\n"
+        f"Адрес: {_display_value(state.get('delivery_address'))}\n"
+        f"Телефон: {_display_value(state.get('phone'))}\n"
+        f"Комментарий: {_display_value(state.get('comment'))}"
+    )
+
+
 async def _submit_order(
     message: Message,
     shop,
@@ -500,13 +671,8 @@ async def _submit_order(
         state={**state, "order_submitted": True},
     )
 
-    shop_settings = get_shop_settings(shop.id)
     manager_text = _build_manager_order_message(order.id, shop.name, state)
-    manager_chat_id = (
-        shop_settings.manager_chat_id
-        if shop_settings and shop_settings.manager_chat_id
-        else settings.default_manager_chat_id
-    )
+    manager_chat_id = _get_manager_chat_id(shop.id)
 
     if manager_chat_id:
         try:
@@ -653,6 +819,35 @@ def _customer_order_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Начать заново",
                     callback_data="reset_order",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Позвать менеджера",
+                    callback_data="call_manager",
+                )
+            ],
+        ]
+    )
+
+
+def _manager_help_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Позвать менеджера",
+                    callback_data="call_manager",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Новый заказ",
+                    callback_data="reset_order",
+                ),
+                InlineKeyboardButton(
+                    text="Изменить пожелания",
+                    callback_data="change_order",
                 ),
             ],
         ]

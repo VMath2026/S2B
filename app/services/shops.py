@@ -73,6 +73,20 @@ def set_current_shop_for_user(telegram_user_id: int, shop_id: int) -> None:
         session.commit()
 
 
+def clear_current_shop_for_user(telegram_user_id: int) -> None:
+    with SessionLocal() as session:
+        user_session = session.scalar(
+            select(UserShopSession).where(
+                UserShopSession.telegram_user_id == telegram_user_id
+            )
+        )
+        if user_session is None:
+            return
+
+        user_session.current_shop_id = None
+        session.commit()
+
+
 def set_manager_chat_for_shop(slug: str, manager_chat_id: int) -> Shop | None:
     normalized_slug = slug.strip()
     if not normalized_slug:

@@ -23,6 +23,7 @@ DEFAULT_ORDER_STATE = {
     "summary": None,
     "is_ready_for_confirmation": False,
     "order_submitted": False,
+    "manager_requested": False,
     "ai_requests_used": 0,
 }
 
