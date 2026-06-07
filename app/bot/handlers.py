@@ -5,6 +5,7 @@ from decimal import Decimal
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -13,6 +14,7 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
+from app.ai.image_generator import ImageGenerationError, generate_bouquet_image
 from app.ai.order_parser import AIUnavailableError, parse_order_message
 from app.config import settings
 from app.services.conversations import (
@@ -442,7 +444,78 @@ async def select_bouquet_callback(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await callback.message.answer(
             _build_selected_bouquet_message(option),
-            reply_markup=_customer_order_keyboard(),
+            reply_markup=_customer_order_keyboard(
+                image_enabled=_is_image_generation_enabled(shop.id),
+            ),
+        )
+
+
+@router.callback_query(F.data == "generate_image")
+async def generate_image_callback(callback: CallbackQuery) -> None:
+    if not _is_private_callback(callback):
+        await callback.answer()
+        return
+
+    shop = get_current_shop_for_user(callback.from_user.id)
+    if shop is None:
+        await callback.answer("Сначала выберите магазин.", show_alert=True)
+        return
+
+    if not _is_image_generation_enabled(shop.id):
+        await callback.answer("Для этого магазина эскизы пока выключены.", show_alert=True)
+        return
+
+    customer = get_or_create_customer(
+        shop_id=shop.id,
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+    )
+    state = get_or_create_conversation_state(shop.id, customer.id)
+    if not state.get("selected_flowers"):
+        await callback.answer("Сначала выберите вариант букета.", show_alert=True)
+        return
+
+    if callback.message is None:
+        await callback.answer()
+        return
+
+    cached_file_id = state.get("generated_image_file_id")
+    if cached_file_id:
+        await callback.answer("Отправляю готовый эскиз.")
+        await callback.message.answer_photo(
+            cached_file_id,
+            caption=_build_image_caption(state),
+        )
+        return
+
+    await callback.answer("Генерирую эскиз. Это может занять немного времени.")
+    progress_message = await callback.message.answer("Генерирую эскиз букета...")
+
+    try:
+        image_bytes = await asyncio.to_thread(
+            generate_bouquet_image,
+            shop_name=shop.name,
+            state=state,
+        )
+    except ImageGenerationError:
+        logger.exception("Bouquet image generation failed")
+        await progress_message.answer(
+            "Не смог сгенерировать эскиз сейчас. Попробуйте позже или позовите менеджера.",
+            reply_markup=_manager_help_keyboard(),
+        )
+        return
+
+    sent_message = await callback.message.answer_photo(
+        BufferedInputFile(image_bytes, filename="bouquet-preview.png"),
+        caption=_build_image_caption(state),
+    )
+    if sent_message.photo:
+        image_file_id = sent_message.photo[-1].file_id
+        update_conversation_state(
+            shop_id=shop.id,
+            customer_id=customer.id,
+            state={**state, "generated_image_file_id": image_file_id},
         )
 
 
@@ -684,7 +757,9 @@ async def text_handler(message: Message) -> None:
         reply_markup=(
             _bouquet_options_keyboard(new_state.get("bouquet_options") or [])
             if new_state.get("bouquet_options")
-            else _customer_order_keyboard()
+            else _customer_order_keyboard(
+                image_enabled=_is_image_generation_enabled(shop.id),
+            )
             if new_state.get("is_ready_for_confirmation")
             else _manager_help_keyboard()
             if int(new_state.get("ai_requests_used") or 0) >= MAX_AI_REQUESTS_PER_ORDER
@@ -1221,6 +1296,21 @@ def _payment_status_label(status: str | None) -> str:
     return labels.get(status or "not_paid", status or "не оплачен")
 
 
+def _is_image_generation_enabled(shop_id: int) -> bool:
+    shop_settings = get_shop_settings(shop_id)
+    return bool(shop_settings and shop_settings.image_generation_enabled)
+
+
+def _build_image_caption(state: dict) -> str:
+    price = state.get("estimated_price")
+    price_text = f"{float(price):.0f} руб." if price not in (None, "") else "уточнить"
+    return (
+        f"Эскиз букета: {_display_value(state.get('summary'))}\n"
+        f"Примерная цена: {price_text}\n"
+        "Изображение примерное: финальный букет зависит от наличия цветов и сборки флориста."
+    )
+
+
 def _post_order_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1244,15 +1334,27 @@ def _post_order_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _customer_order_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def _customer_order_keyboard(*, image_enabled: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="Подтвердить заказ",
+                callback_data="confirm_order",
+            )
+        ]
+    ]
+    if image_enabled:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="Подтвердить заказ",
-                    callback_data="confirm_order",
+                    text="Показать эскиз букета",
+                    callback_data="generate_image",
                 )
-            ],
+            ]
+        )
+
+    rows.extend(
+        [
             [
                 InlineKeyboardButton(
                     text="Изменить пожелания",
@@ -1271,6 +1373,7 @@ def _customer_order_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _manager_help_keyboard() -> InlineKeyboardMarkup:

@@ -12,6 +12,7 @@ Multi-tenant Telegram/AI platform for flower shops.
 - Order is saved and sent to the shop manager Telegram group.
 - Customer can pay the order through Telegram Payments when configured.
 - Bot validates delivery date, phone, budget, and address before creating orders.
+- Bot can generate a visual bouquet preview when image generation is enabled.
 
 ## Stack
 
@@ -81,6 +82,10 @@ Set these environment variables in Render:
 ```text
 BOT_TOKEN=
 OPENAI_API_KEY=
+OPENAI_IMAGE_MODEL=gpt-image-1
+OPENAI_IMAGE_SIZE=1024x1024
+OPENAI_IMAGE_QUALITY=low
+OPENAI_IMAGE_FORMAT=png
 ADMIN_API_KEY=
 APP_BASE_URL=https://your-render-service.onrender.com
 TELEGRAM_WEBHOOK_SECRET=
@@ -123,6 +128,13 @@ To enable online payment after order confirmation, connect a Telegram Payments
 provider in BotFather and put its token into `PAYMENT_PROVIDER_TOKEN`. The bot
 will send an invoice to the customer after the order is created and will notify
 the manager group when the payment succeeds.
+
+To enable bouquet preview images, keep `OPENAI_API_KEY` set, configure
+`OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_SIZE`, `OPENAI_IMAGE_QUALITY`, and
+`OPENAI_IMAGE_FORMAT`, then enable `image_generation_enabled` in the shop
+settings from the admin panel. The bot shows the image button only after the
+customer selects a bouquet option, and reuses the same Telegram image if the
+button is pressed again.
 
 ## Shop Admin Web
 
