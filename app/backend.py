@@ -1,5 +1,6 @@
-from decimal import Decimal
 from contextlib import asynccontextmanager
+from decimal import Decimal
+import logging
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -53,6 +54,9 @@ async def lifespan(app: FastAPI):
 
     if telegram_bot is not None:
         await telegram_bot.session.close()
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="Flower AI Platform API", lifespan=lifespan)
@@ -138,8 +142,27 @@ async def telegram_webhook(
         await request.json(),
         context={"bot": telegram_bot},
     )
+    logger.info("Telegram update received: update_id=%s", update.update_id)
     await telegram_dispatcher.feed_update(telegram_bot, update)
     return {"status": "ok"}
+
+
+@app.get("/telegram/status")
+async def telegram_status() -> dict[str, Any]:
+    if telegram_bot is None:
+        raise HTTPException(status_code=503, detail="BOT_TOKEN is not configured")
+
+    bot_info = await telegram_bot.get_me()
+    webhook_info = await telegram_bot.get_webhook_info()
+
+    return {
+        "bot_id": bot_info.id,
+        "bot_username": bot_info.username,
+        "webhook_url": webhook_info.url,
+        "pending_update_count": webhook_info.pending_update_count,
+        "last_error_date": webhook_info.last_error_date,
+        "last_error_message": webhook_info.last_error_message,
+    }
 
 
 def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
