@@ -126,6 +126,14 @@ async def reset_handler(message: Message) -> None:
     )
 
 
+@router.message(Command("ping"))
+async def ping_handler(message: Message) -> None:
+    if not _is_private_message(message):
+        return
+
+    await message.answer("pong")
+
+
 @router.message(Command("chat_id"))
 async def chat_id_handler(message: Message) -> None:
     await message.answer(f"chat_id этого чата: {message.chat.id}")
@@ -451,11 +459,16 @@ def _is_confirmation_message(text: str | None) -> bool:
 
 
 def _is_private_message(message: Message) -> bool:
-    return message.chat.type == "private"
+    chat_type = message.chat.type
+    return getattr(chat_type, "value", chat_type) == "private"
 
 
 def _is_private_callback(callback: CallbackQuery) -> bool:
-    return callback.message is None or callback.message.chat.type == "private"
+    if callback.message is None:
+        return True
+
+    chat_type = callback.message.chat.type
+    return getattr(chat_type, "value", chat_type) == "private"
 
 
 async def _submit_order(
