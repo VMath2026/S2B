@@ -35,3 +35,11 @@ def get_or_create_customer(
         session.commit()
         session.refresh(customer)
         return customer
+
+
+def get_customer_by_id(customer_id: int | None) -> Customer | None:
+    if customer_id is None:
+        return None
+
+    with SessionLocal() as session:
+        return session.get(Customer, customer_id)

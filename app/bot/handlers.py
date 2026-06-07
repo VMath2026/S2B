@@ -13,7 +13,7 @@ from app.services.conversations import (
     reset_conversation_state,
     update_conversation_state,
 )
-from app.services.customers import get_or_create_customer
+from app.services.customers import get_customer_by_id, get_or_create_customer
 from app.services.flowers import get_active_flowers_for_shop, reserve_selected_flowers
 from app.services.orders import create_confirmed_order, update_order_status
 from app.services.pricing import build_bouquet_options, calculate_selected_flowers_price
@@ -51,7 +51,8 @@ async def start_handler(message: Message, command: CommandObject) -> None:
         pending_shop_options.pop(telegram_user_id, None)
         await message.answer(
             "Здравствуйте! Напишите город, и я покажу доступные цветочные магазины.\n\n"
-            "Например: Москва или Санкт-Петербург."
+            "Например: Москва или Санкт-Петербург.\n\n"
+            + _commands_help_text()
         )
         return
 
@@ -87,7 +88,8 @@ async def start_handler(message: Message, command: CommandObject) -> None:
     await message.answer(
         f"{greeting}\n\n"
         "Чтобы быстрее собрать заказ, напишите одним сообщением: для кого букет, "
-        "повод, бюджет, стиль или цвета, дату, адрес доставки и телефон."
+        "повод, бюджет, стиль или цвета, дату, адрес доставки и телефон.\n\n"
+        + _commands_help_text()
     )
 
 
@@ -155,12 +157,7 @@ async def help_handler(message: Message) -> None:
         return
 
     await message.answer(
-        "Команды:\n"
-        "/new_order — создать новый заказ в текущем магазине\n"
-        "/change_shop — выбрать другой магазин\n"
-        "/manager — позвать менеджера\n"
-        "/reset — сбросить текущий заказ\n"
-        "/ping — проверить, что бот отвечает"
+        _commands_help_text()
     )
 
 
@@ -362,8 +359,20 @@ async def manager_status_callback(callback: CallbackQuery) -> None:
         return
 
     await callback.answer("Статус обновлен.")
+    customer = get_customer_by_id(order.customer_id)
+    if customer is not None:
+        try:
+            await callback.bot.send_message(
+                customer.telegram_user_id,
+                _build_customer_status_message(order.id, order.status),
+            )
+        except Exception:
+            logger.exception("Failed to send order status update to customer")
+
     if callback.message is not None:
-        await callback.message.answer(f"Статус заказа №{order.id}: {order.status}")
+        await callback.message.answer(
+            f"Статус заказа №{order.id}: {_status_label(order.status)}"
+        )
 
 
 @router.message(F.text)
@@ -520,7 +529,8 @@ async def _handle_shop_selection(message: Message, telegram_user_id: int) -> Non
             await message.answer(
                 f"{greeting}\n\n"
                 "Чтобы сэкономить запросы, напишите все пожелания одним сообщением: "
-                "для кого букет, повод, бюджет, стиль или цвета, дата, адрес доставки и телефон."
+                "для кого букет, повод, бюджет, стиль или цвета, дата, адрес доставки и телефон.\n\n"
+                + _commands_help_text()
             )
             return
 
@@ -545,6 +555,40 @@ async def _handle_shop_selection(message: Message, telegram_user_id: int) -> Non
 def _is_confirmation_message(text: str | None) -> bool:
     normalized = (text or "").strip().lower()
     return normalized in {"да", "подтверждаю", "подходит", "ок", "окей", "yes", "y"}
+
+
+def _commands_help_text() -> str:
+    return (
+        "Полезные команды:\n"
+        "/new_order — новый заказ в текущем магазине\n"
+        "/change_shop — выбрать другой магазин\n"
+        "/reset — сбросить текущий заказ\n"
+        "/manager — позвать менеджера\n"
+        "/help — показать команды"
+    )
+
+
+def _status_label(status: str) -> str:
+    labels = {
+        "new": "новый",
+        "accepted": "принят",
+        "in_progress": "в работе",
+        "done": "готов",
+        "cancelled": "отменен",
+    }
+    return labels.get(status, status)
+
+
+def _build_customer_status_message(order_id: int, status: str) -> str:
+    status_label = _status_label(status)
+    messages = {
+        "accepted": "Менеджер принял заказ и скоро уточнит детали.",
+        "in_progress": "Заказ уже в работе.",
+        "done": "Заказ готов.",
+        "cancelled": "Заказ отменен. Если это ошибка, напишите /manager.",
+    }
+    details = messages.get(status, "Статус заказа обновлен.")
+    return f"Статус заказа №{order_id}: {status_label}\n{details}"
 
 
 def _is_private_message(message: Message) -> bool:
