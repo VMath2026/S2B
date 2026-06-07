@@ -43,3 +43,16 @@ def get_customer_by_id(customer_id: int | None) -> Customer | None:
 
     with SessionLocal() as session:
         return session.get(Customer, customer_id)
+
+
+def get_customer_by_telegram_user_id(
+    telegram_user_id: int,
+    *,
+    shop_id: int | None = None,
+) -> Customer | None:
+    with SessionLocal() as session:
+        query = select(Customer).where(Customer.telegram_user_id == telegram_user_id)
+        if shop_id is not None:
+            query = query.where(Customer.shop_id == shop_id)
+
+        return session.scalar(query.order_by(Customer.id.desc()))

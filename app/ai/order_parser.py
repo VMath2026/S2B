@@ -161,7 +161,9 @@ def _extract_text_hints(message: str) -> dict:
             amount *= 1000
         hints["budget"] = amount
 
-    if "завтра" in normalized:
+    if "послезавтра" in normalized:
+        hints["delivery_date"] = "послезавтра"
+    elif "завтра" in normalized:
         hints["delivery_date"] = "завтра"
     elif "сегодня" in normalized:
         hints["delivery_date"] = "сегодня"
@@ -170,9 +172,17 @@ def _extract_text_hints(message: str) -> dict:
         hints["recipient"] = "мама"
     elif re.search(r"\b(жене|жена|девушке|девушка)\b", normalized):
         hints["recipient"] = "жена/девушка"
+    elif re.search(r"\b(подруге|подруга)\b", normalized):
+        hints["recipient"] = "подруга"
+    elif re.search(r"\b(сестре|сестра|сестры)\b", normalized):
+        hints["recipient"] = "сестра"
+    elif re.search(r"\b(мужу|муж|парню|парень)\b", normalized):
+        hints["recipient"] = "мужчина"
 
     if "день рождения" in normalized or re.search(r"\bдр\b", normalized):
         hints["occasion"] = "день рождения"
+    elif "без повода" in normalized:
+        hints["occasion"] = "без повода"
 
     style_words = {
         "нежн": "нежный",
@@ -180,6 +190,8 @@ def _extract_text_hints(message: str) -> dict:
         "романтич": "романтичный",
         "классич": "классический",
         "минимал": "минималистичный",
+        "пастел": "пастельный",
+        "воздуш": "воздушный",
     }
     for marker, style in style_words.items():
         if marker in normalized:
@@ -345,6 +357,11 @@ def _build_system_prompt(
         "- selected_flowers must contain exact flower names from inventory and approximate stem quantities.\n"
         "- estimated_price must be the approximate sum of selected flower prices by stem. Do not include delivery_price unless you explicitly mention delivery separately.\n"
         "- Keep estimated_price within budget when budget is known. If budget is too low for the selected flowers, reduce quantities or explain briefly.\n\n"
+        "Important backend workflow:\n"
+        "- Your main task is to extract order fields. The backend will build final bouquet options from inventory, budget, and colors.\n"
+        "- If the customer has not clicked a bouquet option yet, keep selected_flowers empty and do not claim that the bouquet is already assembled.\n"
+        "- Never substitute requested colors with another color. Keep the customer's requested colors in state.colors and let the backend decide availability.\n"
+        "- If inventory is empty or clearly unsuitable, ask the customer to call a manager instead of inventing products.\n\n"
         "Strict behavior rules:\n"
         "- Keep existing state values unless the customer clearly changes them.\n"
         "- Extract only details the customer actually provided or clearly implied.\n"

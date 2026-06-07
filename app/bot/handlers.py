@@ -12,6 +12,7 @@ from aiogram.types import (
     LabeledPrice,
     Message,
     PreCheckoutQuery,
+    User,
 )
 
 from app.ai.image_generator import ImageGenerationError, generate_bouquet_image
@@ -22,7 +23,11 @@ from app.services.conversations import (
     reset_conversation_state,
     update_conversation_state,
 )
-from app.services.customers import get_customer_by_id, get_or_create_customer
+from app.services.customers import (
+    get_customer_by_id,
+    get_customer_by_telegram_user_id,
+    get_or_create_customer,
+)
 from app.services.flowers import get_active_flowers_for_shop, reserve_selected_flowers
 from app.services.orders import (
     create_confirmed_order,
@@ -187,7 +192,13 @@ async def manager_handler(message: Message) -> None:
         first_name=message.from_user.first_name,
     )
     state = get_or_create_conversation_state(shop.id, customer.id)
-    await _request_manager_help(message, shop, customer.id, state)
+    await _request_manager_help(
+        message,
+        shop,
+        customer.id,
+        state,
+        customer_user=message.from_user,
+    )
 
 
 @router.message(Command("ping"))
@@ -279,6 +290,7 @@ async def manager_reply_handler(message: Message, command: CommandObject) -> Non
         await message.bot.send_message(
             customer.telegram_user_id,
             f"Сообщение менеджера по заказу №{order.id}:\n{reply_text.strip()}",
+            parse_mode=None,
         )
     except Exception:
         logger.exception("Failed to send manager reply to customer")
@@ -286,6 +298,52 @@ async def manager_reply_handler(message: Message, command: CommandObject) -> Non
         return
 
     await message.answer(f"Отправил клиенту сообщение по заказу №{order.id}.")
+
+
+@router.message(Command("message"))
+async def manager_direct_message_handler(message: Message, command: CommandObject) -> None:
+    shop = _get_manager_shop_for_message(message)
+    is_default_manager_chat = _is_default_manager_chat(message)
+    if shop is None and not is_default_manager_chat:
+        await message.answer(
+            "Эта команда работает только в чате менеджеров. Привяжите группу командой /bind_shop slug-магазина."
+        )
+        return
+
+    args = (command.args or "").strip()
+    if not args or " " not in args:
+        await message.answer("Формат: /message telegram_id текст сообщения клиенту")
+        return
+
+    user_id_text, reply_text = args.split(" ", maxsplit=1)
+    if not user_id_text.isdigit() or not reply_text.strip():
+        await message.answer("Формат: /message telegram_id текст сообщения клиенту")
+        return
+
+    telegram_user_id = int(user_id_text)
+    customer = get_customer_by_telegram_user_id(
+        telegram_user_id,
+        shop_id=shop.id if shop is not None else None,
+    )
+    if customer is None:
+        await message.answer("Клиент не найден для этого магазина. Проверьте telegram_id из заявки.")
+        return
+
+    customer_shop = shop or get_shop_by_id(customer.shop_id)
+    shop_name = customer_shop.name if customer_shop is not None else "магазина"
+
+    try:
+        await message.bot.send_message(
+            telegram_user_id,
+            f"Сообщение менеджера «{shop_name}»:\n{reply_text.strip()}",
+            parse_mode=None,
+        )
+    except Exception:
+        logger.exception("Failed to send manager direct message to customer")
+        await message.answer("Не смог отправить сообщение клиенту. Попробуйте открыть диалог кнопкой из заявки.")
+        return
+
+    await message.answer("Отправил сообщение клиенту через бота.")
 
 
 @router.callback_query(F.data.startswith("select_shop:"))
@@ -399,7 +457,13 @@ async def call_manager_callback(callback: CallbackQuery) -> None:
     state = get_or_create_conversation_state(shop.id, customer.id)
     await callback.answer()
     if callback.message is not None:
-        await _request_manager_help(callback.message, shop, customer.id, state)
+        await _request_manager_help(
+            callback.message,
+            shop,
+            customer.id,
+            state,
+            customer_user=callback.from_user,
+        )
 
 
 @router.callback_query(F.data.startswith("select_bouquet:"))
@@ -671,7 +735,7 @@ async def text_handler(message: Message) -> None:
     ai_requests_used = int(state.get("ai_requests_used") or 0)
     if ai_requests_used >= MAX_AI_REQUESTS_PER_ORDER:
         await message.answer(
-            "Чтобы не тратить лишние запросы, я остановлю уточнения. "
+            "Похоже, мы ходим по кругу, поэтому лучше подключить менеджера. "
             "Если не получается договориться с ботом, позовите менеджера. "
             "Если нужно начать заново, напишите /new_order.",
             reply_markup=_manager_help_keyboard(),
@@ -679,6 +743,13 @@ async def text_handler(message: Message) -> None:
         return
 
     shop_settings = get_shop_settings(shop.id)
+    if shop_settings and not shop_settings.ai_enabled:
+        await message.answer(
+            "Сейчас магазин принимает заявки через менеджера. Нажмите кнопку ниже, и я передам ему ваши данные.",
+            reply_markup=_manager_help_keyboard(),
+        )
+        return
+
     flowers = get_active_flowers_for_shop(shop.id)
 
     try:
@@ -825,7 +896,7 @@ def _build_shop_greeting_text(shop) -> str:
     )
     return (
         f"{greeting}\n\n"
-        "Чтобы сэкономить запросы, напишите все пожелания одним сообщением: "
+        "Чтобы быстрее собрать заказ, напишите все пожелания одним сообщением: "
         "для кого букет, повод, бюджет, стиль или цвета, дата, адрес доставки и телефон.\n\n"
         + _commands_help_text()
     )
@@ -902,6 +973,8 @@ async def _request_manager_help(
     shop,
     customer_id: int,
     state: dict,
+    *,
+    customer_user: User | None = None,
 ) -> None:
     if state.get("manager_requested"):
         await message.answer(
@@ -920,7 +993,9 @@ async def _request_manager_help(
     try:
         await message.bot.send_message(
             manager_chat_id,
-            _build_manager_help_message(message, shop.name, state),
+            _build_manager_help_message(customer_user, shop.name, state),
+            reply_markup=_manager_customer_contact_keyboard(customer_user),
+            parse_mode=None,
         )
     except Exception:
         logger.exception("Failed to request manager help")
@@ -947,19 +1022,28 @@ def _get_manager_chat_id(shop_id: int) -> int | None:
     return settings.default_manager_chat_id
 
 
-def _build_manager_help_message(message: Message, shop_name: str, state: dict) -> str:
+def _build_manager_help_message(
+    customer_user: User | None,
+    shop_name: str,
+    state: dict,
+) -> str:
     flowers = state.get("selected_flowers") or []
     flowers_text = ", ".join(
         f"{item.get('name')} x{item.get('quantity')}" for item in flowers
     ) or "еще не выбран"
 
     username = (
-        f"@{message.from_user.username}"
-        if message.from_user and message.from_user.username
+        f"@{customer_user.username}"
+        if customer_user and customer_user.username
         else "не указан"
     )
-    user_id = message.from_user.id if message.from_user else "не указан"
-    first_name = message.from_user.first_name if message.from_user else "не указано"
+    user_id = customer_user.id if customer_user else "не указан"
+    first_name = customer_user.first_name if customer_user else "не указано"
+    reply_hint = (
+        f"/message {user_id} текст сообщения"
+        if isinstance(user_id, int)
+        else "/message telegram_id текст сообщения"
+    )
 
     return (
         "Клиент просит менеджера\n"
@@ -975,7 +1059,8 @@ def _build_manager_help_message(message: Message, shop_name: str, state: dict) -
         f"Дата: {_display_value(state.get('delivery_date'))}\n"
         f"Адрес: {_display_value(state.get('delivery_address'))}\n"
         f"Телефон: {_display_value(state.get('phone'))}\n"
-        f"Комментарий: {_display_value(state.get('comment'))}"
+        f"Комментарий: {_display_value(state.get('comment'))}\n\n"
+        f"Если кнопка ниже не открыла диалог, ответьте через бота: {reply_hint}"
     )
 
 
@@ -1035,7 +1120,8 @@ async def _submit_order(
         state={**state, "order_submitted": True},
     )
 
-    manager_text = _build_manager_order_message(order.id, shop.name, state)
+    customer = get_customer_by_id(customer_id)
+    manager_text = _build_manager_order_message(order.id, shop.name, state, customer)
     manager_chat_id = _get_manager_chat_id(shop.id)
     manager_notified = False
 
@@ -1044,7 +1130,8 @@ async def _submit_order(
             await message.bot.send_message(
                 manager_chat_id,
                 manager_text,
-                reply_markup=_manager_order_keyboard(order.id),
+                reply_markup=_manager_order_keyboard(order.id, customer),
+                parse_mode=None,
             )
             manager_notified = True
         except Exception:
@@ -1200,11 +1287,17 @@ def _bouquet_options_keyboard(options: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _build_manager_order_message(order_id: int, shop_name: str, state: dict) -> str:
+def _build_manager_order_message(
+    order_id: int,
+    shop_name: str,
+    state: dict,
+    customer=None,
+) -> str:
     flowers = state.get("selected_flowers") or []
     flowers_text = ", ".join(
         f"{item.get('name')} x{item.get('quantity')}" for item in flowers
     ) or "не указаны"
+    customer_text = _format_manager_customer_line(customer)
 
     total_price = state.get("estimated_price")
     total_price_text = (
@@ -1216,6 +1309,7 @@ def _build_manager_order_message(order_id: int, shop_name: str, state: dict) -> 
     return (
         f"Принят новый заказ №{order_id} на сумму {total_price_text}\n"
         f"Магазин: {shop_name}\n"
+        f"{customer_text}\n"
         f"Для кого: {state.get('recipient')}\n"
         f"Повод: {state.get('occasion')}\n"
         f"Бюджет: {state.get('budget')}\n"
@@ -1226,12 +1320,64 @@ def _build_manager_order_message(order_id: int, shop_name: str, state: dict) -> 
         f"Адрес: {_display_value(state.get('delivery_address'))}\n"
         f"Телефон: {_display_value(state.get('phone'))}\n"
         f"Комментарий: {_display_value(state.get('comment'))}\n\n"
-        f"Ответить клиенту: /reply {order_id} текст сообщения"
+        f"Ответить клиенту по заказу: /reply {order_id} текст сообщения"
     )
 
 
 def _display_value(value: object) -> object:
     return value if value not in (None, "") else "не указан"
+
+
+def _format_manager_customer_line(customer) -> str:
+    if customer is None:
+        return "Клиент Telegram: не найден"
+
+    username = (
+        f"@{customer.telegram_username}"
+        if getattr(customer, "telegram_username", None)
+        else "username не указан"
+    )
+    first_name = getattr(customer, "first_name", None) or "имя не указано"
+    telegram_user_id = getattr(customer, "telegram_user_id", None) or "id не указан"
+    return f"Клиент Telegram: {first_name}, {username}, id {telegram_user_id}"
+
+
+def _manager_customer_contact_keyboard(customer_contact) -> InlineKeyboardMarkup | None:
+    contact_url = _customer_contact_url(customer_contact)
+    if not contact_url:
+        return None
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Открыть диалог с клиентом",
+                    url=contact_url,
+                )
+            ]
+        ]
+    )
+
+
+def _customer_contact_url(customer_contact) -> str | None:
+    if customer_contact is None:
+        return None
+
+    username = (
+        getattr(customer_contact, "telegram_username", None)
+        or getattr(customer_contact, "username", None)
+    )
+    if username:
+        return f"https://t.me/{str(username).lstrip('@')}"
+
+    telegram_user_id = (
+        getattr(customer_contact, "telegram_user_id", None)
+        or getattr(customer_contact, "id", None)
+    )
+    if telegram_user_id:
+        return f"tg://user?id={telegram_user_id}"
+
+    return None
 
 
 def _get_manager_shop_for_message(message: Message):
@@ -1261,7 +1407,10 @@ def _build_orders_list_message(scope_title: str, orders: list) -> str:
             f"Дата: {_display_value(order.delivery_date)}\n"
             f"Телефон: {_display_value(order.phone)}"
         )
-    lines.append("\nОтвет клиенту: /reply 12 текст сообщения")
+    lines.append(
+        "\nОтвет клиенту по заказу: /reply 12 текст сообщения\n"
+        "Сообщение по Telegram ID: /message telegram_id текст сообщения"
+    )
     return "\n\n".join(lines)
 
 
@@ -1402,9 +1551,21 @@ def _manager_help_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _manager_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def _manager_order_keyboard(order_id: int, customer=None) -> InlineKeyboardMarkup:
+    rows = []
+    contact_url = _customer_contact_url(customer)
+    if contact_url:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Открыть диалог с клиентом",
+                    url=contact_url,
+                )
+            ]
+        )
+
+    rows.extend(
+        [
             [
                 InlineKeyboardButton(
                     text="Принять",
@@ -1426,6 +1587,9 @@ def _manager_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
                 ),
             ],
         ]
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=rows
     )
 
 
