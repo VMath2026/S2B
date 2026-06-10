@@ -237,6 +237,8 @@ def _append_option(
     total = calculate_selected_flowers_price(selected_flowers, flowers)
     if total is None or total > budget:
         return
+    if not _is_harmonious_selection(selected_flowers, selected_style=description):
+        return
 
     signature = tuple(
         sorted(
@@ -254,7 +256,7 @@ def _append_option(
     seen.add(signature)
     options.append(
         {
-            "title": title,
+            "title": f"{_tier_label(total, budget)}: {title}",
             "description": description,
             "selected_flowers": selected_flowers,
             "estimated_price": float(total),
@@ -276,6 +278,36 @@ def _build_description(flowers: list[Flower], style: str | None) -> str:
     if colors:
         return f"Подойдет{style_text}; палитра: {colors}."
     return f"Подойдет{style_text}."
+
+
+def _is_harmonious_selection(selected_flowers: list[dict], *, selected_style: str) -> bool:
+    colors = {
+        normalized
+        for item in selected_flowers
+        if (normalized := _normalize_color(item.get("color")))
+    }
+    if len(colors) <= 2:
+        return True
+
+    allowed_sets = [
+        {"white", "pink", "lavender"},
+        {"white", "red", "pink"},
+        {"white", "blue", "lavender"},
+        {"yellow", "white", "pink"},
+    ]
+    if any(colors.issubset(allowed) for allowed in allowed_sets):
+        return True
+
+    return "ярк" in selected_style.lower()
+
+
+def _tier_label(total: Decimal, budget: Decimal) -> str:
+    ratio = total / budget
+    if ratio < Decimal("0.72"):
+        return "Бюджетный"
+    if ratio < Decimal("0.9"):
+        return "Оптимальный"
+    return "Побогаче"
 
 
 def _translate_color(color: str) -> str:

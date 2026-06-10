@@ -21,6 +21,85 @@ export type Flower = {
   is_active: boolean;
 };
 
+export type OrderStatus = "new" | "accepted" | "in_progress" | "done" | "cancelled" | "paid";
+
+export type PaymentStatus =
+  | "not_paid"
+  | "invoice_sent"
+  | "prepaid"
+  | "paid"
+  | "failed"
+  | "refunded"
+  | string;
+
+export type SelectedFlower = {
+  name?: string | null;
+  quantity?: number | null;
+  color?: string | null;
+  category?: string | null;
+  price_per_stem?: number | null;
+};
+
+export type Customer = {
+  id: number;
+  telegram_user_id: number;
+  telegram_username: string | null;
+  first_name: string | null;
+  contact_url: string | null;
+  created_at: string | null;
+};
+
+export type Order = {
+  id: number;
+  shop_id: number;
+  customer_id: number | null;
+  status: OrderStatus;
+  occasion: string | null;
+  recipient: string | null;
+  budget: number | null;
+  style: string | null;
+  colors: string[] | null;
+  avoid_flowers: string[] | null;
+  delivery_date: string | null;
+  delivery_address: string | null;
+  phone: string | null;
+  comment: string | null;
+  comment_payload: { comment?: string; selected_flowers?: SelectedFlower[]; ai_summary?: string } | null;
+  composition: SelectedFlower[] | null;
+  selected_flowers?: SelectedFlower[];
+  customer_comment?: string | null;
+  ai_summary?: string | null;
+  selected_variant: { title?: string; flowers?: SelectedFlower[]; estimated_price?: number } | null;
+  generated_image_url: string | null;
+  total_price: number | null;
+  payment_status: PaymentStatus;
+  telegram_payment_charge_id: string | null;
+  provider_payment_charge_id: string | null;
+  customer: Customer | null;
+  created_at: string | null;
+};
+
+export type ConversationLog = {
+  id: number;
+  role: string;
+  message: string;
+  meta: Record<string, unknown> | null;
+  created_at: string | null;
+};
+
+export type BouquetTemplate = {
+  id: number;
+  shop_id: number;
+  title: string;
+  description: string | null;
+  style: string | null;
+  colors: string[];
+  flowers: string[];
+  price: number | null;
+  image_url: string | null;
+  created_at: string | null;
+};
+
 export type ShopSettings = {
   id: number;
   shop_id: number;
@@ -28,6 +107,10 @@ export type ShopSettings = {
   tone: string;
   min_order_price: number;
   delivery_price: number;
+  free_delivery_from: number | null;
+  urgent_delivery_price: number;
+  pickup_enabled: boolean;
+  payment_mode: string;
   working_hours: string | null;
   manager_chat_id: number | null;
   ai_enabled: boolean;
@@ -184,6 +267,22 @@ export function getSettings(config: ApiConfig, shopId: number) {
   return request<ShopSettings>(config, `/admin/shops/${shopId}/settings`);
 }
 
+export function listOrders(config: ApiConfig, shopId: number, status?: OrderStatus) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<Order[]>(config, `/admin/shops/${shopId}/orders${query}`);
+}
+
+export function updateOrderStatus(
+  config: ApiConfig,
+  orderId: number,
+  status: OrderStatus,
+) {
+  return request<Order>(config, `/admin/orders/${orderId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
 export function updateSettings(
   config: ApiConfig,
   shopId: number,
@@ -208,4 +307,34 @@ export function setShopCredentials(
       body: JSON.stringify(payload),
     },
   );
+}
+
+export function updateOrderPayment(config: ApiConfig, orderId: number, payment_status: string) {
+  return request<Order>(config, `/admin/orders/${orderId}/payment`, {
+    method: "PATCH",
+    body: JSON.stringify({ payment_status }),
+  });
+}
+
+export function listCustomerOrders(config: ApiConfig, shopId: number, customerId: number) {
+  return request<Order[]>(config, `/admin/shops/${shopId}/customers/${customerId}/orders`);
+}
+
+export function listCustomerConversation(config: ApiConfig, shopId: number, customerId: number) {
+  return request<ConversationLog[]>(config, `/admin/shops/${shopId}/customers/${customerId}/conversation`);
+}
+
+export function listBouquetTemplates(config: ApiConfig, shopId: number) {
+  return request<BouquetTemplate[]>(config, `/admin/shops/${shopId}/bouquet-templates`);
+}
+
+export function createBouquetTemplate(
+  config: ApiConfig,
+  shopId: number,
+  payload: Omit<BouquetTemplate, "id" | "shop_id" | "created_at">,
+) {
+  return request<BouquetTemplate>(config, `/admin/shops/${shopId}/bouquet-templates`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

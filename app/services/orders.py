@@ -28,6 +28,7 @@ def create_confirmed_order(
             delivery_address=state.get("delivery_address"),
             phone=state.get("phone"),
             comment=_build_order_comment(state),
+            selected_variant=_build_selected_variant(state),
             total_price=_to_decimal_or_none(state.get("estimated_price")),
         )
         session.add(order)
@@ -59,6 +60,25 @@ def list_recent_orders_for_shop(shop_id: int, limit: int = 10) -> list[Order]:
             session.scalars(
                 select(Order)
                 .where(Order.shop_id == shop_id)
+                .order_by(Order.id.desc())
+                .limit(limit)
+            ).all()
+        )
+
+
+def list_recent_orders_for_customer(
+    shop_id: int,
+    customer_id: int,
+    limit: int = 5,
+) -> list[Order]:
+    with SessionLocal() as session:
+        return list(
+            session.scalars(
+                select(Order)
+                .where(
+                    Order.shop_id == shop_id,
+                    Order.customer_id == customer_id,
+                )
                 .order_by(Order.id.desc())
                 .limit(limit)
             ).all()
@@ -106,6 +126,20 @@ def _build_order_comment(state: dict) -> str | None:
         "ai_summary": state.get("summary"),
     }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _build_selected_variant(state: dict) -> dict | None:
+    selected_flowers = state.get("selected_flowers") or []
+    if not selected_flowers and not state.get("summary"):
+        return None
+
+    return {
+        "title": state.get("summary"),
+        "style": state.get("style"),
+        "colors": state.get("colors") or [],
+        "flowers": selected_flowers,
+        "estimated_price": state.get("estimated_price"),
+    }
 
 
 def _to_decimal_or_none(value: object) -> Decimal | None:

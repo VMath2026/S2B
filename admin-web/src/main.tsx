@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Check,
+  ClipboardList,
   EyeOff,
   KeyRound,
   Loader2,
@@ -18,22 +19,31 @@ import {
 } from "lucide-react";
 import {
   ApiError,
+  BouquetTemplate,
+  createBouquetTemplate,
   createFlower,
   deactivateFlower,
   Flower,
   FlowerPayload,
   getMe,
   getSettings,
+  listBouquetTemplates,
   listFlowers,
+  listOrders,
   listShops,
   loginShop,
+  Order,
+  OrderStatus,
   resetReservedFlowers,
   setShopCredentials,
   Shop,
   ShopSettings,
+  updateOrderPayment,
+  updateOrderStatus,
   updateFlower,
   updateSettings,
 } from "./api";
+import { OrdersView } from "./OrdersView";
 import "./styles.css";
 
 const emptyFlower: FlowerPayload = {
@@ -45,6 +55,16 @@ const emptyFlower: FlowerPayload = {
   quantity_reserved: 0,
   photo_url: "",
   is_active: true,
+};
+
+const emptyTemplate = {
+  title: "",
+  description: "",
+  style: "",
+  colors: "",
+  flowers: "",
+  price: 0,
+  image_url: "",
 };
 
 type AuthRole = "shop" | "owner";
@@ -74,13 +94,17 @@ function App() {
   const [shops, setShops] = useState<Shop[]>([]);
   const [shopId, setShopId] = useState<number | null>(Number(localStorage.getItem("flowerAdmin.shopId")) || null);
   const [flowers, setFlowers] = useState<Flower[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [templates, setTemplates] = useState<BouquetTemplate[]>([]);
+  const [templateDraft, setTemplateDraft] = useState(emptyTemplate);
   const [settings, setSettings] = useState<ShopSettings | null>(null);
   const [draft, setDraft] = useState<FlowerPayload>(emptyFlower);
   const [editing, setEditing] = useState<Record<number, Partial<FlowerPayload>>>({});
   const [credentialsDraft, setCredentialsDraft] = useState({ username: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [tab, setTab] = useState<"flowers" | "settings">("flowers");
+  const [tab, setTab] = useState<"flowers" | "orders" | "templates" | "settings">("flowers");
+  const [orderStatusFilter, setOrderStatusFilter] = useState<OrderStatus | "all">("all");
 
   const config = useMemo<ApiConfig | null>(() => sessionToConfig(session), [session]);
   const selectedShop = shops.find((shop) => shop.id === shopId) ?? session?.shop ?? null;
@@ -95,6 +119,11 @@ function App() {
     if (username) localStorage.setItem("flowerAdmin.username", username);
     if (shopId) localStorage.setItem("flowerAdmin.shopId", String(shopId));
   }, [baseUrl, username, shopId]);
+
+  useEffect(() => {
+    if (!session || !shopId) return;
+    void reloadOrders(shopId, orderStatusFilter, session);
+  }, [orderStatusFilter]);
 
   async function login() {
     if (!baseUrl.trim()) {
@@ -153,6 +182,8 @@ function App() {
     setShops([]);
     setShopId(null);
     setFlowers([]);
+    setOrders([]);
+    setTemplates([]);
     setSettings(null);
     setMessage("");
   }
@@ -197,12 +228,20 @@ function App() {
     setBusy(true);
     setMessage("");
     try {
-      const [loadedFlowers, loadedSettings] = await Promise.all([
+      const [loadedFlowers, loadedSettings, loadedOrders, loadedTemplates] = await Promise.all([
         listFlowers(activeConfig, nextShopId),
         getSettings(activeConfig, nextShopId),
+        listOrders(
+          activeConfig,
+          nextShopId,
+          orderStatusFilter === "all" ? undefined : orderStatusFilter,
+        ),
+        listBouquetTemplates(activeConfig, nextShopId),
       ]);
       setFlowers(loadedFlowers);
       setSettings(loadedSettings);
+      setOrders(loadedOrders);
+      setTemplates(loadedTemplates);
       const credentialsShop = shops.find((shop) => shop.id === nextShopId) ?? activeSession?.shop ?? null;
       setCredentialsDraft((current) => ({
         username: current.username || credentialsShop?.slug || "",
@@ -211,6 +250,30 @@ function App() {
     } catch (error) {
       if (handleAuthError(error)) return;
       setMessage(error instanceof Error ? error.message : "Не удалось обновить магазин.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reloadOrders(
+    nextShopId = shopId,
+    filter: OrderStatus | "all" = orderStatusFilter,
+    activeSession = session,
+  ) {
+    const activeConfig = sessionToConfig(activeSession);
+    if (!nextShopId || !activeConfig) return;
+
+    setBusy(true);
+    try {
+      const loadedOrders = await listOrders(
+        activeConfig,
+        nextShopId,
+        filter === "all" ? undefined : filter,
+      );
+      setOrders(loadedOrders);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось обновить заказы.");
     } finally {
       setBusy(false);
     }
@@ -287,6 +350,67 @@ function App() {
     }
   }
 
+  async function changeOrderStatus(order: Order, status: OrderStatus) {
+    if (!config || order.status === status) return;
+
+    setBusy(true);
+    try {
+      await updateOrderStatus(config, order.id, status);
+      await reloadOrders(shopId);
+      setMessage(`Статус заказа №${order.id} обновлен.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось обновить статус заказа.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeOrderPayment(order: Order, paymentStatus: string) {
+    if (!config || order.payment_status === paymentStatus) return;
+
+    setBusy(true);
+    try {
+      await updateOrderPayment(config, order.id, paymentStatus);
+      await reloadOrders(shopId);
+      setMessage(`Оплата заказа №${order.id} обновлена.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось обновить оплату заказа.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addTemplate() {
+    if (!shopId || !config) return;
+    if (!templateDraft.title.trim()) {
+      setMessage("Укажите название шаблона букета.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await createBouquetTemplate(config, shopId, {
+        title: templateDraft.title.trim(),
+        description: templateDraft.description.trim() || null,
+        style: templateDraft.style.trim() || null,
+        colors: splitList(templateDraft.colors),
+        flowers: splitList(templateDraft.flowers),
+        price: templateDraft.price || null,
+        image_url: templateDraft.image_url.trim() || null,
+      });
+      setTemplateDraft(emptyTemplate);
+      await reloadShop(shopId);
+      setMessage("Шаблон букета добавлен.");
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось добавить шаблон.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveSettings() {
     if (!shopId || !settings || !config) return;
     setBusy(true);
@@ -296,6 +420,10 @@ function App() {
         tone: settings.tone,
         min_order_price: settings.min_order_price,
         delivery_price: settings.delivery_price,
+        free_delivery_from: settings.free_delivery_from,
+        urgent_delivery_price: settings.urgent_delivery_price,
+        pickup_enabled: settings.pickup_enabled,
+        payment_mode: settings.payment_mode,
         working_hours: settings.working_hours,
         manager_chat_id: settings.manager_chat_id || null,
         ai_enabled: settings.ai_enabled,
@@ -404,12 +532,20 @@ function App() {
           <div className="contentHead">
             <div>
               <p className="eyebrow">{selectedShop?.city ?? "Магазин"}</p>
-              <h2>{tab === "flowers" ? "Товары и остатки" : "Настройки бота"}</h2>
+              <h2>{tab === "flowers" ? "Товары и остатки" : tab === "orders" ? "Заказы менеджера" : tab === "templates" ? "Шаблоны букетов" : "Настройки бота"}</h2>
             </div>
             <div className="tabs">
               <button className={tab === "flowers" ? "active" : ""} onClick={() => setTab("flowers")}>
                 <Sprout size={16} />
                 Товары
+              </button>
+              <button className={tab === "orders" ? "active" : ""} onClick={() => setTab("orders")}>
+                <ClipboardList size={16} />
+                Заказы
+              </button>
+              <button className={tab === "templates" ? "active" : ""} onClick={() => setTab("templates")}>
+                <PackagePlus size={16} />
+                Шаблоны
               </button>
               <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
                 <Settings size={16} />
@@ -429,6 +565,23 @@ function App() {
               saveFlower={saveFlower}
               hideFlower={hideFlower}
               resetReserved={resetReserved}
+              busy={busy}
+            />
+          ) : tab === "orders" ? (
+            <OrdersView
+              orders={orders}
+              statusFilter={orderStatusFilter}
+              setStatusFilter={setOrderStatusFilter}
+              changeOrderStatus={changeOrderStatus}
+              changeOrderPayment={changeOrderPayment}
+              busy={busy}
+            />
+          ) : tab === "templates" ? (
+            <TemplatesView
+              templates={templates}
+              draft={templateDraft}
+              setDraft={setTemplateDraft}
+              addTemplate={addTemplate}
               busy={busy}
             />
           ) : (
@@ -530,6 +683,7 @@ function FlowersView(props: {
         <TextInput label="Название товара" value={draft.name} onChange={(name) => setDraft({ ...draft, name })} placeholder="Роза" />
         <TextInput label="Тип цветка" value={draft.category ?? ""} onChange={(category) => setDraft({ ...draft, category })} placeholder="rose" />
         <TextInput label="Цвет для подбора" value={draft.color ?? ""} onChange={(color) => setDraft({ ...draft, color })} placeholder="red" />
+        <TextInput label="Фото товара" value={draft.photo_url ?? ""} onChange={(photo_url) => setDraft({ ...draft, photo_url })} placeholder="https://..." />
         <NumberInput label="Цена за стебель" value={draft.price_per_stem} onChange={(price_per_stem) => setDraft({ ...draft, price_per_stem })} />
         <NumberInput label="Всего в наличии" value={draft.quantity_available} onChange={(quantity_available) => setDraft({ ...draft, quantity_available })} />
         <button className="primary addButton" onClick={() => void addFlower()} disabled={busy}>
@@ -552,6 +706,7 @@ function FlowersView(props: {
               <th>Название товара</th>
               <th>Тип</th>
               <th>Цвет</th>
+              <th>Фото</th>
               <th>Цена за стебель</th>
               <th>В наличии</th>
               <th>Резерв</th>
@@ -567,6 +722,7 @@ function FlowersView(props: {
                   <td><input value={row.name ?? ""} onChange={(event) => edit(flower.id, "name", event.target.value, setEditing)} /></td>
                   <td><input value={row.category ?? ""} onChange={(event) => edit(flower.id, "category", event.target.value, setEditing)} /></td>
                   <td><input value={row.color ?? ""} onChange={(event) => edit(flower.id, "color", event.target.value, setEditing)} /></td>
+                  <td><input value={row.photo_url ?? ""} onChange={(event) => edit(flower.id, "photo_url", event.target.value, setEditing)} /></td>
                   <td><input type="number" min={0} step={1} value={row.price_per_stem ?? 0} onChange={(event) => edit(flower.id, "price_per_stem", Number(event.target.value), setEditing)} /></td>
                   <td><input type="number" min={0} step={1} value={row.quantity_available ?? 0} onChange={(event) => edit(flower.id, "quantity_available", Number(event.target.value), setEditing)} /></td>
                   <td><input type="number" min={0} step={1} value={row.quantity_reserved ?? 0} onChange={(event) => edit(flower.id, "quantity_reserved", Number(event.target.value), setEditing)} /></td>
@@ -584,6 +740,51 @@ function FlowersView(props: {
             })}
           </tbody>
         </table>
+      </div>
+    </>
+  );
+}
+
+function TemplatesView(props: {
+  templates: BouquetTemplate[];
+  draft: typeof emptyTemplate;
+  setDraft: (value: typeof emptyTemplate) => void;
+  addTemplate: () => Promise<void>;
+  busy: boolean;
+}) {
+  const { templates, draft, setDraft, addTemplate, busy } = props;
+
+  return (
+    <>
+      <div className="settingsGrid">
+        <TextInput label="Название шаблона" value={draft.title} onChange={(title) => setDraft({ ...draft, title })} placeholder="Нежный для мамы" />
+        <TextInput label="Стиль" value={draft.style} onChange={(style) => setDraft({ ...draft, style })} placeholder="нежный, премиум" />
+        <TextInput label="Цвета через запятую" value={draft.colors} onChange={(colors) => setDraft({ ...draft, colors })} placeholder="pink, white" />
+        <TextInput label="Состав через запятую" value={draft.flowers} onChange={(flowers) => setDraft({ ...draft, flowers })} placeholder="Роза x9, Эустома x5" />
+        <NumberInput label="Цена" value={draft.price} onChange={(price) => setDraft({ ...draft, price })} />
+        <TextInput label="Фото шаблона" value={draft.image_url} onChange={(image_url) => setDraft({ ...draft, image_url })} placeholder="https://..." />
+        <label className="wideField">
+          <span>Описание</span>
+          <textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+        </label>
+        <button className="primary saveSettings" onClick={() => void addTemplate()} disabled={busy}>
+          <PackagePlus size={17} />
+          Добавить шаблон
+        </button>
+      </div>
+
+      <div className="templateGrid">
+        {templates.map((template) => (
+          <article className="templateCard" key={template.id}>
+            {template.image_url && <img src={template.image_url} alt="" />}
+            <div>
+              <p className="eyebrow">{template.style || "шаблон"}</p>
+              <h3>{template.title}</h3>
+              <p>{template.description || "Без описания"}</p>
+              <strong>{template.price ? `${Math.round(template.price).toLocaleString("ru-RU")} руб.` : "цена не указана"}</strong>
+            </div>
+          </article>
+        ))}
       </div>
     </>
   );
@@ -629,8 +830,22 @@ function SettingsView(props: {
         </label>
         <NumberInput label="Минимальная сумма заказа" value={settings.min_order_price} onChange={(min_order_price) => setSettings({ ...settings, min_order_price })} />
         <NumberInput label="Стоимость доставки" value={settings.delivery_price} onChange={(delivery_price) => setSettings({ ...settings, delivery_price })} />
+        <NumberInput label="Бесплатная доставка от" value={settings.free_delivery_from ?? 0} onChange={(free_delivery_from) => setSettings({ ...settings, free_delivery_from })} />
+        <NumberInput label="Срочная доставка" value={settings.urgent_delivery_price} onChange={(urgent_delivery_price) => setSettings({ ...settings, urgent_delivery_price })} />
+        <label>
+          <span>Оплата</span>
+          <select value={settings.payment_mode} onChange={(event) => setSettings({ ...settings, payment_mode: event.target.value })}>
+            <option value="after_manager_confirmation">После подтверждения менеджером</option>
+            <option value="prepay_50">Предоплата 50%</option>
+            <option value="full_prepay">Полная оплата</option>
+          </select>
+        </label>
         <TextInput label="График работы" value={settings.working_hours ?? ""} onChange={(working_hours) => setSettings({ ...settings, working_hours })} placeholder="Пн-Вс 09:00-21:00" />
         <NumberInput label="Telegram chat_id менеджеров" value={settings.manager_chat_id ?? 0} onChange={(manager_chat_id) => setSettings({ ...settings, manager_chat_id })} />
+        <label className="toggle">
+          <input type="checkbox" checked={settings.pickup_enabled} onChange={(event) => setSettings({ ...settings, pickup_enabled: event.target.checked })} />
+          <span>Самовывоз доступен</span>
+        </label>
         <label className="toggle">
           <input type="checkbox" checked={settings.ai_enabled} onChange={(event) => setSettings({ ...settings, ai_enabled: event.target.checked })} />
           <span>Бот отвечает клиентам</span>
@@ -729,6 +944,13 @@ function normalizePartialFlower(payload: Partial<FlowerPayload>): Partial<Flower
   return Object.fromEntries(
     Object.entries(payload).map(([key, value]) => [key, value === "" ? null : value]),
   ) as Partial<FlowerPayload>;
+}
+
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function sessionToConfig(session: Session | null): ApiConfig | null {

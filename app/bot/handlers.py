@@ -19,6 +19,7 @@ from app.ai.image_generator import ImageGenerationError, generate_bouquet_image
 from app.ai.order_parser import AIUnavailableError, parse_order_message
 from app.config import settings
 from app.services.conversations import (
+    add_conversation_log,
     get_or_create_conversation_state,
     reset_conversation_state,
     update_conversation_state,
@@ -32,6 +33,7 @@ from app.services.flowers import get_active_flowers_for_shop, reserve_selected_f
 from app.services.orders import (
     create_confirmed_order,
     get_order_by_id,
+    list_recent_orders_for_customer,
     list_recent_orders,
     list_recent_orders_for_shop,
     update_order_payment_status,
@@ -645,7 +647,11 @@ async def pre_checkout_handler(query: PreCheckoutQuery) -> None:
         await query.answer(ok=False, error_message="Заказ не найден.")
         return
 
-    expected_amount = _payment_amount_minor(order.total_price)
+    shop_settings = get_shop_settings(order.shop_id)
+    expected_amount = _payment_amount_minor(
+        order.total_price,
+        payment_mode=shop_settings.payment_mode if shop_settings else "full_prepay",
+    )
     if expected_amount is None or query.total_amount != expected_amount:
         await query.answer(ok=False, error_message="Сумма заказа изменилась. Напишите /manager.")
         return
@@ -664,9 +670,17 @@ async def successful_payment_handler(message: Message) -> None:
         await message.answer("Оплата прошла, но я не смог связать ее с заказом. Напишите /manager.")
         return
 
+    existing_order = get_order_by_id(order_id)
+    shop_settings = get_shop_settings(existing_order.shop_id) if existing_order is not None else None
+    next_payment_status = (
+        "prepaid"
+        if shop_settings is not None and shop_settings.payment_mode == "prepay_50"
+        else "paid"
+    )
+
     order = update_order_payment_status(
         order_id,
-        "paid",
+        next_payment_status,
         telegram_payment_charge_id=payment.telegram_payment_charge_id,
         provider_payment_charge_id=payment.provider_payment_charge_id,
     )
@@ -720,6 +734,20 @@ async def text_handler(message: Message) -> None:
         shop_id=shop.id,
         customer_id=customer.id,
     )
+    user_text = message.text or ""
+    add_conversation_log(
+        shop_id=shop.id,
+        customer_id=customer.id,
+        role="customer",
+        message=user_text,
+    )
+
+    state = _apply_customer_history_shortcuts(
+        shop_id=shop.id,
+        customer_id=customer.id,
+        state=state,
+        user_message=user_text,
+    )
 
     if _is_confirmation_message(message.text) and state.get("is_ready_for_confirmation"):
         await _submit_order(message, shop, customer.id, state)
@@ -759,7 +787,7 @@ async def text_handler(message: Message) -> None:
             shop_settings=shop_settings,
             flowers=flowers,
             current_state=state,
-            user_message=message.text or "",
+            user_message=user_text,
         )
     except AIUnavailableError:
         logger.exception("AI order parser is unavailable")
@@ -822,6 +850,17 @@ async def text_handler(message: Message) -> None:
         state=new_state,
     )
 
+    add_conversation_log(
+        shop_id=shop.id,
+        customer_id=customer.id,
+        role="bot",
+        message=ai_response.reply,
+        meta={
+            "message_kind": ai_response.message_kind,
+            "missing_fields": ai_response.missing_fields,
+        },
+    )
+
     await message.answer(
         ai_response.reply,
         reply_markup=(
@@ -837,6 +876,70 @@ async def text_handler(message: Message) -> None:
             else None
         ),
     )
+
+
+def _apply_customer_history_shortcuts(
+    *,
+    shop_id: int,
+    customer_id: int,
+    state: dict,
+    user_message: str,
+) -> dict:
+    normalized = (user_message or "").strip().lower()
+    history_markers = (
+        "как в прошлый раз",
+        "повторить заказ",
+        "повтори заказ",
+        "тот же адрес",
+        "тот же телефон",
+    )
+    if not any(marker in normalized for marker in history_markers):
+        return state
+
+    previous_orders = list_recent_orders_for_customer(shop_id, customer_id, limit=1)
+    if not previous_orders:
+        return state
+
+    previous = previous_orders[0]
+    updated = dict(state)
+    if "повтор" in normalized or "как в прошлый раз" in normalized:
+        for key in (
+            "occasion",
+            "recipient",
+            "budget",
+            "style",
+            "colors",
+            "avoid_flowers",
+            "delivery_address",
+            "phone",
+            "selected_flowers",
+            "estimated_price",
+            "summary",
+        ):
+            value = _state_value_from_order(previous, key)
+            if value not in (None, "", []):
+                updated[key] = value
+
+    if ("тот же адрес" in normalized or "как в прошлый раз" in normalized) and previous.delivery_address:
+        updated["delivery_address"] = previous.delivery_address
+
+    if ("тот же телефон" in normalized or "как в прошлый раз" in normalized) and previous.phone:
+        updated["phone"] = previous.phone
+
+    return updated
+
+
+def _state_value_from_order(order, key: str):
+    if key == "selected_flowers":
+        return (order.selected_variant or {}).get("flowers") if order.selected_variant else []
+    if key == "estimated_price":
+        return float(order.total_price) if order.total_price is not None else None
+    if key == "summary":
+        return (order.selected_variant or {}).get("title") if order.selected_variant else None
+    value = getattr(order, key, None)
+    if key == "budget" and value is not None:
+        return float(value)
+    return value
 
 
 async def _handle_shop_selection(message: Message, telegram_user_id: int) -> None:
@@ -936,6 +1039,7 @@ def _status_label(status: str) -> str:
         "in_progress": "в работе",
         "done": "готов",
         "cancelled": "отменен",
+        "paid": "оплачен",
     }
     return labels.get(status, status)
 
@@ -1118,7 +1222,7 @@ async def _submit_order(
     )
 
     customer = get_customer_by_id(customer_id)
-    manager_text = _build_manager_order_message(order.id, shop.name, state, customer)
+    manager_text = _build_manager_order_message_v2(order.id, shop.name, state, customer)
     manager_chat_id = _get_manager_chat_id(shop.id)
     manager_notified = False
 
@@ -1176,7 +1280,13 @@ async def _send_payment_invoice(
         )
         return
 
-    amount = _payment_amount_minor(order.total_price)
+    shop_settings = get_shop_settings(order.shop_id)
+    payment_mode = shop_settings.payment_mode if shop_settings else "full_prepay"
+    if payment_mode == "after_manager_confirmation":
+        await message.answer("Оплата будет доступна после подтверждения заказа менеджером.")
+        return
+
+    amount = _payment_amount_minor(order.total_price, payment_mode=payment_mode)
     if amount is None:
         await message.answer("Сумма заказа пока не определена. Менеджер уточнит оплату вручную.")
         return
@@ -1196,7 +1306,7 @@ async def _send_payment_invoice(
             payload=f"order:{order.id}",
             provider_token=settings.payment_provider_token,
             currency=settings.payment_currency,
-            prices=[LabeledPrice(label=f"Заказ №{order.id}", amount=amount)],
+            prices=[LabeledPrice(label=_payment_label(order.id, payment_mode), amount=amount)],
             start_parameter=f"flower-order-{order.id}",
         )
         update_order_payment_status(order.id, "invoice_sent")
@@ -1374,6 +1484,65 @@ def _build_manager_order_message(
     )
 
 
+def _build_manager_order_message_v2(
+    order_id: int,
+    shop_name: str,
+    state: dict,
+    customer=None,
+) -> str:
+    flowers = state.get("selected_flowers") or []
+    flowers_text = ", ".join(
+        f"{item.get('name')} x{item.get('quantity')}" for item in flowers
+    ) or "состав не указан"
+    customer_text = _format_manager_customer_line(customer)
+
+    total_price = state.get("estimated_price")
+    total_price_text = (
+        f"{float(total_price):.0f} руб."
+        if total_price not in (None, "")
+        else "уточнить"
+    )
+    budget = state.get("budget")
+    budget_text = (
+        f"{float(budget):.0f} руб."
+        if budget not in (None, "")
+        else "не указан"
+    )
+    payment_text = (
+        "счет отправится клиенту автоматически"
+        if settings.payment_provider_token
+        else "ручная оплата после проверки менеджером"
+    )
+
+    return (
+        f"Новый заказ №{order_id}\n"
+        f"Магазин: {shop_name}\n"
+        f"{customer_text}\n"
+        "Статус: новый\n"
+        f"Оплата: {payment_text}\n"
+        f"Сумма: {total_price_text}\n\n"
+        f"Букет: {_display_value(state.get('summary'))}\n"
+        f"Состав: {flowers_text}\n"
+        f"Для кого: {_display_value(state.get('recipient'))}\n"
+        f"Повод: {_display_value(state.get('occasion'))}\n"
+        f"Бюджет клиента: {budget_text}\n"
+        f"Стиль: {_display_value(state.get('style'))}\n"
+        f"Цвета: {_format_manager_colors(state)}\n\n"
+        f"Доставка: {_display_value(state.get('delivery_date'))}\n"
+        f"Адрес: {_display_value(state.get('delivery_address'))}\n"
+        f"Телефон: {_display_value(state.get('phone'))}\n"
+        f"Комментарий: {_display_value(state.get('comment'))}\n\n"
+        f"Ответить клиенту: /reply {order_id} текст сообщения"
+    )
+
+
+def _format_manager_colors(state: dict) -> str:
+    colors = state.get("colors") or []
+    if not colors:
+        return "не указаны"
+    return ", ".join(_display_color(color) for color in colors)
+
+
 def _display_value(value: object) -> object:
     return value if value not in (None, "") else "не указан"
 
@@ -1464,17 +1633,30 @@ def _build_orders_list_message(scope_title: str, orders: list) -> str:
     return "\n\n".join(lines)
 
 
-def _payment_amount_minor(total_price: object) -> int | None:
+def _payment_amount_minor(
+    total_price: object,
+    *,
+    payment_mode: str = "full_prepay",
+) -> int | None:
     if total_price in (None, ""):
         return None
 
     try:
-        amount = (Decimal(str(total_price)).quantize(Decimal("0.01")) * 100)
+        amount = Decimal(str(total_price)).quantize(Decimal("0.01"))
+        if payment_mode == "prepay_50":
+            amount = (amount * Decimal("0.5")).quantize(Decimal("0.01"))
+        amount = amount * 100
     except Exception:
         return None
 
     amount_minor = int(amount)
     return amount_minor if amount_minor > 0 else None
+
+
+def _payment_label(order_id: int, payment_mode: str) -> str:
+    if payment_mode == "prepay_50":
+        return f"Предоплата 50% по заказу №{order_id}"
+    return f"Заказ №{order_id}"
 
 
 def _order_id_from_payment_payload(payload: str | None) -> int | None:
@@ -1491,6 +1673,7 @@ def _payment_status_label(status: str | None) -> str:
     labels = {
         "not_paid": "не оплачен",
         "invoice_sent": "счет отправлен",
+        "prepaid": "предоплата получена",
         "paid": "оплачен",
         "failed": "оплата не прошла",
         "refunded": "возврат",

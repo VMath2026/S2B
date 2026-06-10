@@ -300,7 +300,7 @@ select:focus {
 
 .addRow {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr 110px 110px auto;
+  grid-template-columns: 1.4fr 1fr 1fr 1.3fr 110px 110px auto;
   gap: 10px;
   margin-top: 14px;
   padding: 14px;
@@ -398,6 +398,38 @@ td input {
   grid-column: 1 / -1;
 }
 
+.wideField {
+  grid-column: 1 / -1;
+}
+
+.templateGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.templateCard {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 12px;
+}
+
+.templateCard img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.templateCard h3,
+.templateCard p {
+  margin: 0;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -437,6 +469,206 @@ td input {
   color: #6f6255;
 }
 
+.ordersPanel {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.ordersToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 14px;
+}
+
+.ordersToolbar h3,
+.orderCard h3 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.statusFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.statusFilters button {
+  min-height: 34px;
+  border: 1px solid #cfc7bc;
+  border-radius: 6px;
+  background: #fff;
+  color: #17201b;
+  padding: 0 10px;
+  font-weight: 700;
+}
+
+.statusFilters button:hover {
+  border-color: #537f68;
+}
+
+.statusFilters button.active {
+  border-color: #2f6f55;
+  background: #17201b;
+  color: #fff;
+}
+
+.ordersGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.orderCard {
+  display: grid;
+  gap: 14px;
+  border: 1px solid #d8d0c3;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 14px;
+}
+
+.orderCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.orderBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid #cfc7bc;
+  border-radius: 999px;
+  background: #fff;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.status-new {
+  border-color: #d3b56d;
+  background: #fff8df;
+  color: #76510f;
+}
+
+.status-accepted,
+.payment-invoice_sent {
+  border-color: #7fa7c8;
+  background: #eef7ff;
+  color: #235372;
+}
+
+.status-in_progress {
+  border-color: #a88dcb;
+  background: #f4efff;
+  color: #604087;
+}
+
+.status-done,
+.status-paid,
+.payment-prepaid,
+.payment-paid {
+  border-color: #76a88c;
+  background: #e8f1ed;
+  color: #1f5f46;
+}
+
+.status-cancelled,
+.payment-failed {
+  border-color: #d29b97;
+  background: #fff1f0;
+  color: #9a342f;
+}
+
+.payment-not_paid {
+  color: #66594d;
+}
+
+.orderSummary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.orderSummary div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #e6ded2;
+  border-radius: 8px;
+  background: #faf7f0;
+  padding: 10px;
+  font-weight: 700;
+}
+
+.orderSummary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.orderDetails {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.orderDetails > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.orderDetails .wide {
+  grid-column: 1 / -1;
+}
+
+.orderDetails span {
+  color: #7b6b59;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.orderDetails strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #17201b;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.orderActions {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px);
+  gap: 10px;
+  align-items: end;
+}
+
+.mutedText {
+  margin: 4px 0 0;
+  color: #766b5d;
+}
+
 .spin {
   animation: spin 0.8s linear infinite;
 }
@@ -456,8 +688,24 @@ td input {
   .workspace,
   .addRow,
   .settingsGrid,
-  .credentialsPanel {
+  .credentialsPanel,
+  .templateGrid,
+  .ordersGrid,
+  .orderDetails,
+  .orderActions,
+  .orderSummary {
     grid-template-columns: 1fr;
+  }
+
+  .ordersToolbar,
+  .orderCardHead {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .statusFilters,
+  .orderBadges {
+    justify-content: flex-start;
   }
 
   .sidebar {

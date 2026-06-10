@@ -2,7 +2,7 @@ from copy import deepcopy
 
 from sqlalchemy import select
 
-from app.db.models import ConversationState
+from app.db.models import ConversationLog, ConversationState
 from app.db.session import SessionLocal
 
 
@@ -105,3 +105,47 @@ def update_conversation_state(
 
         session.commit()
         return state
+
+
+def add_conversation_log(
+    *,
+    shop_id: int,
+    customer_id: int | None,
+    role: str,
+    message: str,
+    meta: dict | None = None,
+) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+
+    with SessionLocal() as session:
+        session.add(
+            ConversationLog(
+                shop_id=shop_id,
+                customer_id=customer_id,
+                role=role,
+                message=text[:4000],
+                meta=meta,
+            )
+        )
+        session.commit()
+
+
+def list_conversation_logs_for_customer(
+    shop_id: int,
+    customer_id: int,
+    limit: int = 80,
+) -> list[ConversationLog]:
+    with SessionLocal() as session:
+        return list(
+            session.scalars(
+                select(ConversationLog)
+                .where(
+                    ConversationLog.shop_id == shop_id,
+                    ConversationLog.customer_id == customer_id,
+                )
+                .order_by(ConversationLog.id.desc())
+                .limit(limit)
+            ).all()
+        )

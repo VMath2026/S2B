@@ -45,6 +45,10 @@ class ShopSettings(Base):
     tone: Mapped[str] = mapped_column(Text, default="friendly", nullable=False)
     min_order_price: Mapped[float] = mapped_column(Numeric, default=0, nullable=False)
     delivery_price: Mapped[float] = mapped_column(Numeric, default=0, nullable=False)
+    free_delivery_from: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    urgent_delivery_price: Mapped[float] = mapped_column(Numeric, default=0, nullable=False)
+    pickup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    payment_mode: Mapped[str] = mapped_column(Text, default="after_manager_confirmation", nullable=False)
     working_hours: Mapped[str | None] = mapped_column(Text, nullable=True)
     manager_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -128,6 +132,24 @@ class ConversationState(Base):
     )
 
 
+class ConversationLog(Base):
+    __tablename__ = "conversation_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    customer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Flower(Base):
     __tablename__ = "flowers"
 
@@ -174,6 +196,7 @@ class Order(Base):
     delivery_address: Mapped[str | None] = mapped_column(Text, nullable=True)
     phone: Mapped[str | None] = mapped_column(Text, nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_variant: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     generated_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     total_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     payment_status: Mapped[str] = mapped_column(Text, default="not_paid", nullable=False)
