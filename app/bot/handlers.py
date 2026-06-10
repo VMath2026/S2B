@@ -896,7 +896,11 @@ def _apply_customer_history_shortcuts(
     if not any(marker in normalized for marker in history_markers):
         return state
 
-    previous_orders = list_recent_orders_for_customer(shop_id, customer_id, limit=1)
+    try:
+        previous_orders = list_recent_orders_for_customer(shop_id, customer_id, limit=1)
+    except Exception:
+        logger.exception("Failed to load customer order history")
+        return state
     if not previous_orders:
         return state
 

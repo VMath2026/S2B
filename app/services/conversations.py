@@ -1,9 +1,13 @@
 from copy import deepcopy
+import logging
 
 from sqlalchemy import select
 
 from app.db.models import ConversationLog, ConversationState
 from app.db.session import SessionLocal
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_ORDER_STATE = {
@@ -119,17 +123,20 @@ def add_conversation_log(
     if not text:
         return
 
-    with SessionLocal() as session:
-        session.add(
-            ConversationLog(
-                shop_id=shop_id,
-                customer_id=customer_id,
-                role=role,
-                message=text[:4000],
-                meta=meta,
+    try:
+        with SessionLocal() as session:
+            session.add(
+                ConversationLog(
+                    shop_id=shop_id,
+                    customer_id=customer_id,
+                    role=role,
+                    message=text[:4000],
+                    meta=meta,
+                )
             )
-        )
-        session.commit()
+            session.commit()
+    except Exception:
+        logger.exception("Failed to write conversation log")
 
 
 def list_conversation_logs_for_customer(

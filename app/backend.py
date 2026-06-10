@@ -26,6 +26,7 @@ from app.db.models import (
     Shop,
     ShopSettings,
 )
+from app.db.init_db import ensure_database_schema
 from app.db.seed import seed_db
 from app.db.session import SessionLocal, engine
 from app.services.admin_auth import (
@@ -50,8 +51,7 @@ async def lifespan(app: FastAPI):
     global telegram_bot
 
     if settings.init_database_on_start:
-        Base.metadata.create_all(bind=engine)
-        _run_startup_schema_updates()
+        ensure_database_schema()
         if settings.seed_database_on_start:
             seed_db()
 
@@ -392,58 +392,7 @@ def _get_public_url() -> str:
 
 
 def _run_startup_schema_updates() -> None:
-    with engine.begin() as connection:
-        connection.execute(text("alter table shop_settings add column if not exists free_delivery_from numeric"))
-        connection.execute(
-            text(
-                "alter table shop_settings "
-                "add column if not exists urgent_delivery_price numeric not null default 0"
-            )
-        )
-        connection.execute(
-            text(
-                "alter table shop_settings "
-                "add column if not exists pickup_enabled boolean not null default true"
-            )
-        )
-        connection.execute(
-            text(
-                "alter table shop_settings "
-                "add column if not exists payment_mode text not null default 'after_manager_confirmation'"
-            )
-        )
-        connection.execute(
-            text(
-                "alter table orders "
-                "add column if not exists payment_status text not null default 'not_paid'"
-            )
-        )
-        connection.execute(text("alter table orders add column if not exists selected_variant jsonb"))
-        connection.execute(
-            text(
-                "alter table orders "
-                "add column if not exists telegram_payment_charge_id text"
-            )
-        )
-        connection.execute(
-            text(
-                "alter table orders "
-                "add column if not exists provider_payment_charge_id text"
-            )
-        )
-        connection.execute(
-            text(
-                "create table if not exists conversation_logs ("
-                "id serial primary key, "
-                "shop_id integer not null references shops(id) on delete cascade, "
-                "customer_id integer references customers(id) on delete set null, "
-                "role text not null, "
-                "message text not null, "
-                "meta jsonb, "
-                "created_at timestamp default now()"
-                ")"
-            )
-        )
+    ensure_database_schema()
 
 
 @app.get("/shops")

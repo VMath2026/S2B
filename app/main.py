@@ -8,6 +8,8 @@ from aiogram.enums import ParseMode
 from app.bot.commands import get_bot_commands
 from app.bot.handlers import router
 from app.config import settings
+from app.db.init_db import ensure_database_schema
+from app.db.seed import seed_db
 
 
 async def main() -> None:
@@ -15,6 +17,11 @@ async def main() -> None:
 
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is empty. Add Telegram bot token to .env")
+
+    if settings.init_database_on_start:
+        ensure_database_schema()
+        if settings.seed_database_on_start:
+            seed_db()
 
     bot = Bot(
         token=settings.bot_token,
