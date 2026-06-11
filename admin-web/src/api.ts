@@ -21,7 +21,7 @@ export type Flower = {
   is_active: boolean;
 };
 
-export type OrderStatus = "new" | "accepted" | "in_progress" | "done" | "cancelled" | "paid";
+export type OrderStatus = "new" | "accepted" | "awaiting_payment" | "in_progress" | "done" | "cancelled" | "paid";
 
 export type PaymentStatus =
   | "not_paid"
@@ -69,7 +69,20 @@ export type Order = {
   selected_flowers?: SelectedFlower[];
   customer_comment?: string | null;
   ai_summary?: string | null;
-  selected_variant: { title?: string; flowers?: SelectedFlower[]; estimated_price?: number } | null;
+  selected_variant: {
+    title?: string;
+    flowers?: SelectedFlower[];
+    estimated_price?: number;
+    delivery_type?: string;
+    urgent_delivery?: boolean;
+  } | null;
+  pricing_summary: {
+    bouquet_total: number;
+    delivery_fee: number;
+    grand_total: number;
+    delivery_type: string;
+    urgent_delivery: boolean;
+  };
   generated_image_url: string | null;
   total_price: number | null;
   payment_status: PaymentStatus;
@@ -77,6 +90,24 @@ export type Order = {
   provider_payment_charge_id: string | null;
   customer: Customer | null;
   created_at: string | null;
+};
+
+export type OrderUpdatePayload = {
+  recipient?: string | null;
+  occasion?: string | null;
+  budget?: number | null;
+  style?: string | null;
+  colors?: string[] | null;
+  avoid_flowers?: string[] | null;
+  delivery_date?: string | null;
+  delivery_address?: string | null;
+  phone?: string | null;
+  customer_comment?: string | null;
+  selected_variant_title?: string | null;
+  selected_flowers?: SelectedFlower[] | null;
+  delivery_type?: string | null;
+  urgent_delivery?: boolean | null;
+  total_price?: number | null;
 };
 
 export type ConversationLog = {
@@ -316,12 +347,78 @@ export function updateOrderPayment(config: ApiConfig, orderId: number, payment_s
   });
 }
 
+export function updateOrder(config: ApiConfig, orderId: number, payload: OrderUpdatePayload) {
+  return request<Order>(config, `/admin/orders/${orderId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function sendOrderInvoice(
+  config: ApiConfig,
+  orderId: number,
+  payment_mode: "full_prepay" | "prepay_50",
+) {
+  return request<{ status: string; order: Order; amount: number }>(
+    config,
+    `/admin/orders/${orderId}/send-invoice`,
+    {
+      method: "POST",
+      body: JSON.stringify({ payment_mode }),
+    },
+  );
+}
+
+export function sendPaymentReminder(config: ApiConfig, orderId: number) {
+  return request<{ status: string }>(
+    config,
+    `/admin/orders/${orderId}/payment-reminder`,
+    { method: "POST" },
+  );
+}
+
+export async function exportOrdersCsv(config: ApiConfig, shopId: number) {
+  const response = await fetch(buildUrl(config.baseUrl, `/admin/shops/${shopId}/orders/export.csv`), {
+    headers: {
+      ...(config.token ? { Authorization: `Bearer ${config.token}` } : {}),
+      ...(config.adminKey ? { "X-Admin-Key": config.adminKey } : {}),
+    },
+  });
+  if (!response.ok) {
+    throw new ApiError(response.statusText, response.status);
+  }
+  return response.blob();
+}
+
+export function confirmOrder(config: ApiConfig, orderId: number) {
+  return request<{ status: string; order: Order }>(
+    config,
+    `/admin/orders/${orderId}/confirm`,
+    { method: "POST" },
+  );
+}
+
+export function messageOrderCustomer(config: ApiConfig, orderId: number, text: string) {
+  return request<{ status: string }>(
+    config,
+    `/admin/orders/${orderId}/message`,
+    {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    },
+  );
+}
+
 export function listCustomerOrders(config: ApiConfig, shopId: number, customerId: number) {
   return request<Order[]>(config, `/admin/shops/${shopId}/customers/${customerId}/orders`);
 }
 
 export function listCustomerConversation(config: ApiConfig, shopId: number, customerId: number) {
   return request<ConversationLog[]>(config, `/admin/shops/${shopId}/customers/${customerId}/conversation`);
+}
+
+export function listShopErrors(config: ApiConfig, shopId: number) {
+  return request<ConversationLog[]>(config, `/admin/shops/${shopId}/errors`);
 }
 
 export function listBouquetTemplates(config: ApiConfig, shopId: number) {

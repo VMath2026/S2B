@@ -1,14 +1,17 @@
 from contextlib import asynccontextmanager
+import csv
 from decimal import Decimal
+from io import StringIO
 import json
 import logging
+import traceback
 from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Update
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from aiogram.types import LabeledPrice, Update
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
@@ -36,9 +39,15 @@ from app.services.admin_auth import (
     create_shop_admin_token,
     verify_shop_admin_token,
 )
-from app.services.conversations import list_conversation_logs_for_customer
+from app.services.conversations import (
+    add_conversation_log,
+    list_conversation_logs_for_customer,
+    list_error_logs_for_shop,
+)
+from app.services.customers import get_customer_by_telegram_user_id
 from app.services.flowers import get_active_flowers_for_shop, reset_reserved_flowers_for_shop
-from app.services.shops import get_active_shops_by_city, get_shop_by_id
+from app.services.orders import update_order_payment_status, update_order_status
+from app.services.shops import get_active_shops_by_city, get_current_shop_for_user, get_shop_by_id
 
 
 telegram_bot: Bot | None = None
@@ -152,6 +161,40 @@ class PaymentStatusUpdate(BaseModel):
     payment_status: str
 
 
+class OrderUpdate(BaseModel):
+    recipient: str | None = None
+    occasion: str | None = None
+    budget: Decimal | None = Field(default=None, ge=0)
+    style: str | None = None
+    colors: list[str] | None = None
+    avoid_flowers: list[str] | None = None
+    delivery_date: str | None = None
+    delivery_address: str | None = None
+    phone: str | None = None
+    customer_comment: str | None = None
+    selected_variant_title: str | None = None
+    selected_flowers: list[dict[str, Any]] | None = None
+    delivery_type: str | None = None
+    urgent_delivery: bool | None = None
+    total_price: Decimal | None = Field(default=None, ge=0)
+
+
+class SendInvoiceRequest(BaseModel):
+    payment_mode: str = "full_prepay"
+
+
+class CustomerMessageRequest(BaseModel):
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("text cannot be empty")
+        return normalized
+
+
 class BouquetTemplatePayload(BaseModel):
     title: str
     description: str | None = None
@@ -213,12 +256,18 @@ async def telegram_webhook(
     ):
         logger.warning("Telegram webhook secret mismatch; processing update anyway")
 
+    update_payload = await request.json()
     update = Update.model_validate(
-        await request.json(),
+        update_payload,
         context={"bot": telegram_bot},
     )
     logger.warning("Telegram update received: update_id=%s", update.update_id)
-    await telegram_dispatcher.feed_update(telegram_bot, update)
+    try:
+        await telegram_dispatcher.feed_update(telegram_bot, update)
+    except Exception:
+        logger.exception("Telegram update processing failed")
+        _log_telegram_update_error(update_payload)
+        raise
     return {"status": "ok"}
 
 
@@ -389,6 +438,51 @@ def _ensure_can_access_shop(
 def _get_public_url() -> str:
     public_url = settings.app_base_url or settings.render_external_url
     return public_url.rstrip("/")
+
+
+def _log_telegram_update_error(update_payload: dict[str, Any]) -> None:
+    user_id = _extract_telegram_user_id(update_payload)
+    if user_id is None:
+        return
+
+    shop = get_current_shop_for_user(user_id)
+    if shop is None:
+        return
+
+    customer = get_customer_by_telegram_user_id(user_id, shop_id=shop.id)
+    message_text = _extract_update_text(update_payload)
+    add_conversation_log(
+        shop_id=shop.id,
+        customer_id=customer.id if customer else None,
+        role="error",
+        message=f"Ошибка обработки Telegram update: {message_text or 'без текста'}",
+        meta={
+            "telegram_user_id": user_id,
+            "traceback": traceback.format_exc()[-3500:],
+            "update_id": update_payload.get("update_id"),
+        },
+    )
+
+
+def _extract_telegram_user_id(update_payload: dict[str, Any]) -> int | None:
+    for key in ("message", "callback_query", "pre_checkout_query"):
+        payload = update_payload.get(key)
+        if not isinstance(payload, dict):
+            continue
+        user = payload.get("from")
+        if isinstance(user, dict) and isinstance(user.get("id"), int):
+            return user["id"]
+    return None
+
+
+def _extract_update_text(update_payload: dict[str, Any]) -> str | None:
+    message = update_payload.get("message")
+    if isinstance(message, dict):
+        return message.get("text") or message.get("caption")
+    callback = update_payload.get("callback_query")
+    if isinstance(callback, dict):
+        return callback.get("data")
+    return None
 
 
 def _run_startup_schema_updates() -> None:
@@ -575,7 +669,7 @@ def admin_update_order_status(
     order_id: int,
     payload: OrderStatusUpdate,
 ) -> dict[str, Any]:
-    allowed_statuses = {"new", "accepted", "in_progress", "done", "cancelled", "paid"}
+    allowed_statuses = {"new", "accepted", "awaiting_payment", "in_progress", "done", "cancelled", "paid"}
     if payload.status not in allowed_statuses:
         raise HTTPException(
             status_code=400,
@@ -583,14 +677,78 @@ def admin_update_order_status(
         )
 
     with SessionLocal() as session:
+        existing_order = session.get(Order, order_id)
+        customer = session.get(Customer, existing_order.customer_id) if existing_order and existing_order.customer_id else None
+
+    order = update_order_status(order_id, payload.status)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return _order_to_dict(order, customer)
+
+
+@app.patch("/admin/orders/{order_id}", dependencies=[Depends(require_order_access)])
+def admin_update_order(
+    order_id: int,
+    payload: OrderUpdate,
+) -> dict[str, Any]:
+    with SessionLocal() as session:
         order = session.get(Order, order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        order.status = payload.status
+        data = payload.model_dump(exclude_unset=True)
+        comment_payload = _parse_order_comment(order.comment)
+        for key in (
+            "recipient",
+            "occasion",
+            "budget",
+            "style",
+            "colors",
+            "avoid_flowers",
+            "delivery_date",
+            "delivery_address",
+            "phone",
+            "total_price",
+        ):
+            if key in data:
+                setattr(order, key, _clean_order_value(data[key]))
+
+        if "customer_comment" in data:
+            comment_payload["comment"] = _clean_order_value(data["customer_comment"])
+
+        if "selected_flowers" in data:
+            selected_flowers = _normalize_selected_flowers(data["selected_flowers"] or [])
+            comment_payload["selected_flowers"] = selected_flowers
+            order.selected_variant = {
+                **(order.selected_variant or {}),
+                "title": data.get("selected_variant_title")
+                if "selected_variant_title" in data
+                else (order.selected_variant or {}).get("title"),
+                "flowers": selected_flowers,
+                "estimated_price": _decimal_to_float(order.total_price),
+            }
+
+        if "selected_variant_title" in data:
+            order.selected_variant = {
+                **(order.selected_variant or {}),
+                "title": _clean_order_value(data["selected_variant_title"]),
+                "estimated_price": _decimal_to_float(order.total_price),
+            }
+            comment_payload["ai_summary"] = _clean_order_value(data["selected_variant_title"])
+
+        if "delivery_type" in data or "urgent_delivery" in data:
+            selected_variant = dict(order.selected_variant or {})
+            if "delivery_type" in data:
+                selected_variant["delivery_type"] = _clean_order_value(data["delivery_type"]) or "delivery"
+            if "urgent_delivery" in data:
+                selected_variant["urgent_delivery"] = bool(data["urgent_delivery"])
+            order.selected_variant = selected_variant
+
+        order.comment = json.dumps(comment_payload, ensure_ascii=False)
         session.commit()
         session.refresh(order)
-        return _order_to_dict(order)
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+        return _order_to_dict(order, customer)
 
 
 @app.patch("/admin/orders/{order_id}/payment", dependencies=[Depends(require_order_access)])
@@ -605,17 +763,210 @@ def admin_update_order_payment(
             detail=f"payment_status must be one of: {', '.join(sorted(allowed_statuses))}",
         )
 
+    order = update_order_payment_status(order_id, payload.payment_status)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if payload.payment_status == "paid":
+        order = update_order_status(order_id, "paid") or order
+    with SessionLocal() as session:
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+    return _order_to_dict(order, customer)
+
+
+@app.post("/admin/orders/{order_id}/send-invoice", dependencies=[Depends(require_order_access)])
+async def admin_send_order_invoice(
+    order_id: int,
+    payload: SendInvoiceRequest,
+) -> dict[str, Any]:
+    if not settings.payment_provider_token:
+        raise HTTPException(status_code=503, detail="PAYMENT_PROVIDER_TOKEN is not configured")
+    if not settings.bot_token:
+        raise HTTPException(status_code=503, detail="BOT_TOKEN is not configured")
+    if payload.payment_mode not in {"full_prepay", "prepay_50"}:
+        raise HTTPException(status_code=400, detail="payment_mode must be full_prepay or prepay_50")
+
     with SessionLocal() as session:
         order = session.get(Order, order_id)
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+        shop = session.get(Shop, order.shop_id)
+        if customer is None:
+            raise HTTPException(status_code=400, detail="Order has no Telegram customer")
+        pricing = _order_pricing_to_dict(order, _get_or_create_settings(session, order.shop_id))
+        amount = _payment_amount_minor(pricing["grand_total"], payment_mode=payload.payment_mode)
+        if amount is None:
+            raise HTTPException(status_code=400, detail="Order total_price must be greater than 0")
 
-        order.payment_status = payload.payment_status
-        if payload.payment_status == "paid":
-            order.status = "paid"
+    bot = telegram_bot
+    close_bot = False
+    if bot is None:
+        bot = Bot(
+            token=settings.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        close_bot = True
+
+    try:
+        await bot.send_invoice(
+            chat_id=customer.telegram_user_id,
+            title=f"Букет от «{shop.name if shop else 'магазина'}»",
+            description=_invoice_description(order),
+            payload=f"order:{order.id}",
+            provider_token=settings.payment_provider_token,
+            currency=settings.payment_currency,
+            prices=[LabeledPrice(label=_payment_label(order.id, payload.payment_mode), amount=amount)],
+            start_parameter=f"flower-order-{order.id}",
+        )
+    except Exception as exc:
+        logger.exception("Failed to send admin invoice")
+        raise HTTPException(status_code=502, detail="Failed to send invoice to Telegram") from exc
+    finally:
+        if close_bot:
+            await bot.session.close()
+
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        order.payment_status = "invoice_sent"
+        order.status = "awaiting_payment"
         session.commit()
         session.refresh(order)
-        return _order_to_dict(order)
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+        return {
+            "status": "ok",
+            "order": _order_to_dict(order, customer),
+            "amount": amount / 100,
+        }
+
+
+@app.post("/admin/orders/{order_id}/confirm", dependencies=[Depends(require_order_access)])
+async def admin_confirm_order(order_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+        shop = session.get(Shop, order.shop_id)
+        if customer is None:
+            raise HTTPException(status_code=400, detail="Order has no Telegram customer")
+
+        order.status = "accepted"
+        session.commit()
+        session.refresh(order)
+        text_message = _order_confirmation_message(order, shop)
+
+    await _send_telegram_message(customer.telegram_user_id, text_message)
+
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        customer = session.get(Customer, order.customer_id) if order and order.customer_id else None
+        return {"status": "ok", "order": _order_to_dict(order, customer)}
+
+
+@app.post("/admin/orders/{order_id}/message", dependencies=[Depends(require_order_access)])
+async def admin_message_order_customer(
+    order_id: int,
+    payload: CustomerMessageRequest,
+) -> dict[str, Any]:
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+        shop = session.get(Shop, order.shop_id)
+        if customer is None:
+            raise HTTPException(status_code=400, detail="Order has no Telegram customer")
+
+    await _send_telegram_message(
+        customer.telegram_user_id,
+        f"Сообщение менеджера «{shop.name if shop else 'магазина'}» по заказу №{order_id}:\n{payload.text}",
+    )
+    return {"status": "ok"}
+
+
+@app.post("/admin/orders/{order_id}/payment-reminder", dependencies=[Depends(require_order_access)])
+async def admin_send_payment_reminder(order_id: int) -> dict[str, Any]:
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        customer = session.get(Customer, order.customer_id) if order.customer_id else None
+        shop = session.get(Shop, order.shop_id)
+        if customer is None:
+            raise HTTPException(status_code=400, detail="Order has no Telegram customer")
+        pricing = _order_pricing_to_dict(order, _get_or_create_settings(session, order.shop_id))
+
+    await _send_telegram_message(
+        customer.telegram_user_id,
+        (
+            f"Напоминаем об оплате заказа №{order_id} в магазине «{shop.name if shop else 'магазин'}».\n"
+            f"К оплате: {pricing['grand_total']:.0f} руб.\n"
+            "Если счет не пришел или нужна помощь, ответьте на это сообщение."
+        ),
+    )
+    return {"status": "ok"}
+
+
+@app.get("/admin/shops/{shop_id}/orders/export.csv", dependencies=[Depends(require_shop_access)])
+def admin_export_orders_csv(shop_id: int) -> Response:
+    _require_shop(shop_id)
+    with SessionLocal() as session:
+        shop_settings = _get_or_create_settings(session, shop_id)
+        orders = list(
+            session.scalars(
+                select(Order).where(Order.shop_id == shop_id).order_by(Order.id.desc())
+            ).all()
+        )
+        customer_ids = {order.customer_id for order in orders if order.customer_id is not None}
+        customers = {
+            customer.id: customer
+            for customer in session.scalars(select(Customer).where(Customer.id.in_(customer_ids))).all()
+        } if customer_ids else {}
+
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "id",
+            "created_at",
+            "status",
+            "payment_status",
+            "customer",
+            "phone",
+            "delivery_date",
+            "delivery_address",
+            "bouquet_total",
+            "delivery_fee",
+            "grand_total",
+            "composition",
+            "comment",
+        ])
+        for order in orders:
+            payload = _parse_order_comment(order.comment)
+            pricing = _order_pricing_to_dict(order, shop_settings)
+            customer = customers.get(order.customer_id)
+            writer.writerow([
+                order.id,
+                order.created_at.isoformat() if order.created_at else "",
+                order.status,
+                order.payment_status,
+                _customer_display_name(customer),
+                order.phone or "",
+                order.delivery_date or "",
+                order.delivery_address or "",
+                pricing["bouquet_total"],
+                pricing["delivery_fee"],
+                pricing["grand_total"],
+                _composition_to_text((order.selected_variant or {}).get("flowers") or payload.get("selected_flowers") or []),
+                payload.get("comment") or "",
+            ])
+
+    return Response(
+        content="\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=orders.csv"},
+    )
 
 
 @app.get("/admin/shops/{shop_id}/customers/{customer_id}/orders", dependencies=[Depends(require_shop_access)])
@@ -642,6 +993,13 @@ def admin_list_customer_conversation(shop_id: int, customer_id: int) -> list[dic
     _require_shop(shop_id)
     logs = list_conversation_logs_for_customer(shop_id, customer_id)
     return [_conversation_log_to_dict(log) for log in reversed(logs)]
+
+
+@app.get("/admin/shops/{shop_id}/errors", dependencies=[Depends(require_shop_access)])
+def admin_list_shop_errors(shop_id: int) -> list[dict[str, Any]]:
+    _require_shop(shop_id)
+    logs = list_error_logs_for_shop(shop_id)
+    return [_conversation_log_to_dict(log) for log in logs]
 
 
 @app.get("/admin/shops/{shop_id}/bouquet-templates", dependencies=[Depends(require_shop_access)])
@@ -802,13 +1160,20 @@ def _flower_to_dict(flower: Flower) -> dict[str, Any]:
     }
 
 
-def _order_to_dict(order: Order, customer: Customer | None = None) -> dict[str, Any]:
+def _order_to_dict(
+    order: Order,
+    customer: Customer | None = None,
+    shop_settings: ShopSettings | None = None,
+) -> dict[str, Any]:
     comment_payload = _parse_order_comment(order.comment)
     selected_flowers = (
         (order.selected_variant or {}).get("flowers")
         if order.selected_variant
         else comment_payload.get("selected_flowers", [])
     )
+    if shop_settings is None:
+        with SessionLocal() as session:
+            shop_settings = _get_or_create_settings(session, order.shop_id)
     return {
         "id": order.id,
         "shop_id": order.shop_id,
@@ -830,6 +1195,7 @@ def _order_to_dict(order: Order, customer: Customer | None = None) -> dict[str, 
         "selected_flowers": selected_flowers,
         "ai_summary": comment_payload.get("ai_summary") or None,
         "selected_variant": order.selected_variant,
+        "pricing_summary": _order_pricing_to_dict(order, shop_settings),
         "generated_image_url": order.generated_image_url,
         "total_price": _decimal_to_float(order.total_price),
         "payment_status": order.payment_status,
@@ -875,6 +1241,15 @@ def _customer_to_dict(customer: Customer | None) -> dict[str, Any] | None:
     }
 
 
+def _customer_display_name(customer: Customer | None) -> str:
+    if customer is None:
+        return ""
+    username = f"@{customer.telegram_username}" if customer.telegram_username else ""
+    return " ".join(
+        part for part in (customer.first_name, username, str(customer.telegram_user_id)) if part
+    )
+
+
 def _conversation_log_to_dict(log: ConversationLog) -> dict[str, Any]:
     return {
         "id": log.id,
@@ -912,6 +1287,153 @@ def _normalize_bouquet_template_payload(payload: dict[str, Any]) -> dict[str, An
     normalized["colors"] = [str(item).strip() for item in normalized.get("colors") or [] if str(item).strip()]
     normalized["flowers"] = [str(item).strip() for item in normalized.get("flowers") or [] if str(item).strip()]
     return normalized
+
+
+def _clean_order_value(value: Any) -> Any:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return value
+
+
+def _normalize_selected_flowers(flowers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for flower in flowers:
+        name = str(flower.get("name") or "").strip()
+        if not name:
+            continue
+
+        item: dict[str, Any] = {"name": name}
+        quantity = flower.get("quantity")
+        try:
+            if quantity not in (None, ""):
+                item["quantity"] = max(1, int(quantity))
+        except (TypeError, ValueError):
+            pass
+
+        color = str(flower.get("color") or "").strip()
+        if color:
+            item["color"] = color
+        category = str(flower.get("category") or "").strip()
+        if category:
+            item["category"] = category
+        normalized.append(item)
+    return normalized
+
+
+def _payment_amount_minor(
+    total_price: Any,
+    *,
+    payment_mode: str = "full_prepay",
+) -> int | None:
+    if total_price in (None, ""):
+        return None
+    try:
+        amount = Decimal(str(total_price)).quantize(Decimal("0.01"))
+        if payment_mode == "prepay_50":
+            amount = (amount * Decimal("0.5")).quantize(Decimal("0.01"))
+        amount_minor = int(amount * 100)
+    except Exception:
+        return None
+    return amount_minor if amount_minor > 0 else None
+
+
+def _order_pricing_to_dict(order: Order, shop_settings: ShopSettings) -> dict[str, float | str | bool]:
+    bouquet_total = _decimal_to_float(order.total_price) or 0
+    delivery_type = str((order.selected_variant or {}).get("delivery_type") or "delivery")
+    urgent_delivery = bool((order.selected_variant or {}).get("urgent_delivery"))
+    delivery_fee = 0.0
+
+    if delivery_type != "pickup":
+        free_from = _decimal_to_float(shop_settings.free_delivery_from)
+        if free_from is None or bouquet_total < free_from:
+            delivery_fee = _decimal_to_float(shop_settings.delivery_price) or 0
+        if urgent_delivery:
+            delivery_fee += _decimal_to_float(shop_settings.urgent_delivery_price) or 0
+
+    return {
+        "bouquet_total": float(bouquet_total),
+        "delivery_fee": float(delivery_fee),
+        "grand_total": float(bouquet_total + delivery_fee),
+        "delivery_type": delivery_type,
+        "urgent_delivery": urgent_delivery,
+    }
+
+
+def _composition_to_text(flowers: list[dict]) -> str:
+    return "; ".join(
+        " ".join(
+            part
+            for part in (
+                str(item.get("name") or "").strip(),
+                f"x{item.get('quantity')}" if item.get("quantity") else "",
+                str(item.get("color") or "").strip(),
+            )
+            if part
+        )
+        for item in flowers
+        if isinstance(item, dict)
+    )
+
+
+def _payment_label(order_id: int, payment_mode: str) -> str:
+    if payment_mode == "prepay_50":
+        return f"Предоплата 50% по заказу №{order_id}"
+    return f"Заказ №{order_id}"
+
+
+def _invoice_description(order: Order) -> str:
+    variant = (order.selected_variant or {}).get("title")
+    parts = [
+        f"Заказ №{order.id}",
+        str(variant or order.occasion or "букет"),
+        str(order.delivery_date or ""),
+    ]
+    return ". ".join(part for part in parts if part).strip()[:240]
+
+
+async def _send_telegram_message(chat_id: int, text_message: str) -> None:
+    if not settings.bot_token:
+        raise HTTPException(status_code=503, detail="BOT_TOKEN is not configured")
+
+    bot = telegram_bot
+    close_bot = False
+    if bot is None:
+        bot = Bot(
+            token=settings.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        close_bot = True
+
+    try:
+        await bot.send_message(chat_id, text_message, parse_mode=None)
+    except Exception as exc:
+        logger.exception("Failed to send Telegram message")
+        raise HTTPException(status_code=502, detail="Failed to send Telegram message") from exc
+    finally:
+        if close_bot:
+            await bot.session.close()
+
+
+def _order_confirmation_message(order: Order, shop: Shop | None) -> str:
+    price = _decimal_to_float(order.total_price)
+    price_text = (
+        f"{price:.0f} руб."
+        if price is not None
+        else "менеджер уточнит отдельно"
+    )
+    return (
+        f"Заказ №{order.id} подтвержден.\n"
+        f"Магазин: {shop.name if shop else 'магазин'}\n"
+        f"Вариант: {(order.selected_variant or {}).get('title') or order.occasion or 'букет'}\n"
+        f"Сумма: {price_text}\n"
+        f"Доставка: {_display_value(order.delivery_date)}, {_display_value(order.delivery_address)}\n\n"
+        "Если все верно, дождитесь счета или сообщения менеджера с дальнейшими шагами."
+    )
+
+
+def _display_value(value: object) -> object:
+    return value if value not in (None, "") else "не указано"
 
 
 def _parse_order_comment(comment: str | None) -> dict[str, Any]:

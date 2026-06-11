@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.db.models import Order
 from app.db.session import SessionLocal
+from app.services.flowers import fulfill_reserved_flowers, release_reserved_flowers
 
 
 def create_confirmed_order(
@@ -43,6 +44,7 @@ def update_order_status(order_id: int, status: str) -> Order | None:
         if order is None:
             return None
 
+        _apply_inventory_for_status(order, status)
         order.status = status
         session.commit()
         session.refresh(order)
@@ -109,6 +111,8 @@ def update_order_payment_status(
             return None
 
         order.payment_status = payment_status
+        if payment_status == "paid":
+            _apply_inventory_for_status(order, "paid")
         if telegram_payment_charge_id:
             order.telegram_payment_charge_id = telegram_payment_charge_id
         if provider_payment_charge_id:
@@ -117,6 +121,43 @@ def update_order_payment_status(
         session.commit()
         session.refresh(order)
         return order
+
+
+def _apply_inventory_for_status(order: Order, next_status: str) -> None:
+    selected_flowers = _selected_flowers_from_order(order)
+    if not selected_flowers:
+        return
+
+    selected_variant = dict(order.selected_variant or {})
+    inventory_finalized = bool(selected_variant.get("inventory_finalized"))
+
+    if next_status == "cancelled" and not inventory_finalized:
+        release_reserved_flowers(order.shop_id, selected_flowers)
+        selected_variant["inventory_finalized"] = True
+        selected_variant["inventory_action"] = "released"
+        order.selected_variant = selected_variant
+        return
+
+    if next_status in {"done", "paid"} and not inventory_finalized:
+        fulfill_reserved_flowers(order.shop_id, selected_flowers)
+        selected_variant["inventory_finalized"] = True
+        selected_variant["inventory_action"] = "fulfilled"
+        order.selected_variant = selected_variant
+
+
+def _selected_flowers_from_order(order: Order) -> list[dict]:
+    if order.selected_variant and order.selected_variant.get("flowers"):
+        return order.selected_variant.get("flowers") or []
+    if not order.comment:
+        return []
+    try:
+        payload = json.loads(order.comment)
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    flowers = payload.get("selected_flowers")
+    return flowers if isinstance(flowers, list) else []
 
 
 def _build_order_comment(state: dict) -> str | None:

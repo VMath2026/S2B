@@ -20,25 +20,35 @@ import {
 import {
   ApiError,
   BouquetTemplate,
+  confirmOrder,
+  ConversationLog,
   createBouquetTemplate,
   createFlower,
   deactivateFlower,
+  exportOrdersCsv,
   Flower,
   FlowerPayload,
   getMe,
   getSettings,
   listBouquetTemplates,
+  listCustomerConversation,
   listFlowers,
   listOrders,
+  listShopErrors,
   listShops,
   loginShop,
+  messageOrderCustomer,
   Order,
   OrderStatus,
+  OrderUpdatePayload,
   resetReservedFlowers,
+  sendOrderInvoice,
+  sendPaymentReminder,
   setShopCredentials,
   Shop,
   ShopSettings,
   updateOrderPayment,
+  updateOrder,
   updateOrderStatus,
   updateFlower,
   updateSettings,
@@ -95,6 +105,7 @@ function App() {
   const [shopId, setShopId] = useState<number | null>(Number(localStorage.getItem("flowerAdmin.shopId")) || null);
   const [flowers, setFlowers] = useState<Flower[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [errorLogs, setErrorLogs] = useState<ConversationLog[]>([]);
   const [templates, setTemplates] = useState<BouquetTemplate[]>([]);
   const [templateDraft, setTemplateDraft] = useState(emptyTemplate);
   const [settings, setSettings] = useState<ShopSettings | null>(null);
@@ -103,7 +114,7 @@ function App() {
   const [credentialsDraft, setCredentialsDraft] = useState({ username: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [tab, setTab] = useState<"flowers" | "orders" | "templates" | "settings">("flowers");
+  const [tab, setTab] = useState<"flowers" | "orders" | "templates" | "errors" | "settings">("flowers");
   const [orderStatusFilter, setOrderStatusFilter] = useState<OrderStatus | "all">("all");
 
   const config = useMemo<ApiConfig | null>(() => sessionToConfig(session), [session]);
@@ -228,7 +239,7 @@ function App() {
     setBusy(true);
     setMessage("");
     try {
-      const [loadedFlowers, loadedSettings, loadedOrders, loadedTemplates] = await Promise.all([
+      const [loadedFlowers, loadedSettings, loadedOrders, loadedTemplates, loadedErrors] = await Promise.all([
         listFlowers(activeConfig, nextShopId),
         getSettings(activeConfig, nextShopId),
         listOrders(
@@ -237,11 +248,13 @@ function App() {
           orderStatusFilter === "all" ? undefined : orderStatusFilter,
         ),
         listBouquetTemplates(activeConfig, nextShopId),
+        listShopErrors(activeConfig, nextShopId),
       ]);
       setFlowers(loadedFlowers);
       setSettings(loadedSettings);
       setOrders(loadedOrders);
       setTemplates(loadedTemplates);
+      setErrorLogs(loadedErrors);
       const credentialsShop = shops.find((shop) => shop.id === nextShopId) ?? activeSession?.shop ?? null;
       setCredentialsDraft((current) => ({
         username: current.username || credentialsShop?.slug || "",
@@ -379,6 +392,120 @@ function App() {
       setMessage(error instanceof Error ? error.message : "Не удалось обновить оплату заказа.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveOrder(order: Order, payload: OrderUpdatePayload) {
+    if (!config) return;
+
+    setBusy(true);
+    try {
+      await updateOrder(config, order.id, payload);
+      await reloadOrders(shopId);
+      setMessage(`Заказ №${order.id} сохранен.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось сохранить заказ.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendInvoice(order: Order, paymentMode: "full_prepay" | "prepay_50") {
+    if (!config) return;
+
+    setBusy(true);
+    try {
+      const response = await sendOrderInvoice(config, order.id, paymentMode);
+      await reloadOrders(shopId);
+      setMessage(`Счет по заказу №${order.id} отправлен клиенту на ${Math.round(response.amount).toLocaleString("ru-RU")} руб.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось отправить счет клиенту.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remindPayment(order: Order) {
+    if (!config) return;
+
+    setBusy(true);
+    try {
+      await sendPaymentReminder(config, order.id);
+      setMessage(`Напоминание об оплате заказа №${order.id} отправлено.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось отправить напоминание.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function exportOrders() {
+    if (!config || !shopId) return;
+
+    setBusy(true);
+    try {
+      const blob = await exportOrdersCsv(config, shopId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "orders.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage("Экспорт заказов подготовлен.");
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось экспортировать заказы.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmOrderForCustomer(order: Order) {
+    if (!config) return;
+
+    setBusy(true);
+    try {
+      await confirmOrder(config, order.id);
+      await reloadOrders(shopId);
+      setMessage(`Заказ №${order.id} подтвержден, клиенту отправлено сообщение.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось подтвердить заказ.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function messageCustomer(order: Order, text: string) {
+    if (!config) return;
+    if (!text.trim()) {
+      setMessage("Введите сообщение для клиента.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await messageOrderCustomer(config, order.id, text);
+      setMessage(`Сообщение по заказу №${order.id} отправлено клиенту.`);
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      setMessage(error instanceof Error ? error.message : "Не удалось отправить сообщение клиенту.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadOrderConversation(order: Order) {
+    if (!config || !shopId || !order.customer_id) return [];
+    try {
+      return await listCustomerConversation(config, shopId, order.customer_id);
+    } catch (error) {
+      if (handleAuthError(error)) return [];
+      setMessage(error instanceof Error ? error.message : "Не удалось загрузить диалог.");
+      return [];
     }
   }
 
@@ -532,7 +659,7 @@ function App() {
           <div className="contentHead">
             <div>
               <p className="eyebrow">{selectedShop?.city ?? "Магазин"}</p>
-              <h2>{tab === "flowers" ? "Товары и остатки" : tab === "orders" ? "Заказы менеджера" : tab === "templates" ? "Шаблоны букетов" : "Настройки бота"}</h2>
+              <h2>{tab === "flowers" ? "Товары и остатки" : tab === "orders" ? "Заказы менеджера" : tab === "templates" ? "Шаблоны букетов" : tab === "errors" ? "Ошибки бота" : "Настройки бота"}</h2>
             </div>
             <div className="tabs">
               <button className={tab === "flowers" ? "active" : ""} onClick={() => setTab("flowers")}>
@@ -546,6 +673,10 @@ function App() {
               <button className={tab === "templates" ? "active" : ""} onClick={() => setTab("templates")}>
                 <PackagePlus size={16} />
                 Шаблоны
+              </button>
+              <button className={tab === "errors" ? "active" : ""} onClick={() => setTab("errors")}>
+                <ClipboardList size={16} />
+                Ошибки
               </button>
               <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
                 <Settings size={16} />
@@ -574,6 +705,13 @@ function App() {
               setStatusFilter={setOrderStatusFilter}
               changeOrderStatus={changeOrderStatus}
               changeOrderPayment={changeOrderPayment}
+              saveOrder={saveOrder}
+              sendInvoice={sendInvoice}
+              confirmOrder={confirmOrderForCustomer}
+              messageCustomer={messageCustomer}
+              loadConversation={loadOrderConversation}
+              remindPayment={remindPayment}
+              exportOrders={exportOrders}
               busy={busy}
             />
           ) : tab === "templates" ? (
@@ -584,6 +722,8 @@ function App() {
               addTemplate={addTemplate}
               busy={busy}
             />
+          ) : tab === "errors" ? (
+            <ErrorsView errors={errorLogs} />
           ) : (
             <SettingsView
               settings={settings}
@@ -790,6 +930,28 @@ function TemplatesView(props: {
   );
 }
 
+function ErrorsView(props: { errors: ConversationLog[] }) {
+  if (props.errors.length === 0) {
+    return <div className="empty">Ошибок бота пока нет.</div>;
+  }
+
+  return (
+    <div className="errorList">
+      {props.errors.map((error) => (
+        <article className="errorCard" key={error.id}>
+          <div>
+            <p className="eyebrow">{formatDateTime(error.created_at)}</p>
+            <h3>{error.message}</h3>
+          </div>
+          {typeof error.meta?.traceback === "string" && (
+            <pre>{error.meta.traceback}</pre>
+          )}
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function SettingsView(props: {
   settings: ShopSettings | null;
   setSettings: (settings: ShopSettings) => void;
@@ -951,6 +1113,19 @@ function splitList(value: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function formatDateTime(value: string | null): string {
+  if (!value) return "дата не указана";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function sessionToConfig(session: Session | null): ApiConfig | null {

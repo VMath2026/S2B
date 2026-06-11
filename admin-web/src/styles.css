@@ -525,6 +525,12 @@ td input {
   gap: 12px;
 }
 
+.orderFilters {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 180px 180px;
+  gap: 10px;
+}
+
 .orderCard {
   display: grid;
   gap: 14px;
@@ -659,9 +665,116 @@ td input {
 
 .orderActions {
   display: grid;
-  grid-template-columns: minmax(220px, 320px);
+  grid-template-columns: auto minmax(180px, 260px) minmax(180px, 260px);
   gap: 10px;
   align-items: end;
+}
+
+.orderEditGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  border-top: 1px solid #e6ded2;
+  padding-top: 12px;
+}
+
+.orderEditGrid .wide {
+  grid-column: 1 / -1;
+}
+
+.orderEditGrid textarea {
+  min-height: 74px;
+}
+
+.orderEditActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.managerMessageBox {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #e6ded2;
+  padding-top: 12px;
+}
+
+.managerMessageBox textarea {
+  min-height: 76px;
+}
+
+.quickReplies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quickReplies button {
+  border: 1px solid #cfc7bc;
+  border-radius: 6px;
+  background: #fff;
+  color: #17201b;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.quickReplies button:hover {
+  border-color: #537f68;
+}
+
+.conversationBox {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #e6ded2;
+  padding-top: 12px;
+}
+
+.conversationMessage {
+  border: 1px solid #e6ded2;
+  border-radius: 6px;
+  background: #faf7f0;
+  padding: 9px;
+}
+
+.conversationMessage span {
+  color: #7b6b59;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.conversationMessage p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.errorList {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.errorCard {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d29b97;
+  border-radius: 8px;
+  background: #fff8f7;
+  padding: 14px;
+}
+
+.errorCard h3 {
+  margin: 0;
+}
+
+.errorCard pre {
+  max-height: 240px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #17201b;
+  color: #fff;
+  padding: 10px;
+  white-space: pre-wrap;
 }
 
 .mutedText {
@@ -691,8 +804,10 @@ td input {
   .credentialsPanel,
   .templateGrid,
   .ordersGrid,
+  .orderFilters,
   .orderDetails,
   .orderActions,
+  .orderEditGrid,
   .orderSummary {
     grid-template-columns: 1fr;
   }

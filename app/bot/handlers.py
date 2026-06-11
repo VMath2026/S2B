@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -41,6 +42,7 @@ from app.services.orders import (
 )
 from app.services.order_validation import validate_order_state
 from app.services.pricing import build_bouquet_options, calculate_selected_flowers_price
+from app.services.templates import build_template_bouquet_options
 from app.services.shops import (
     clear_current_shop_for_user,
     get_active_shops_by_city,
@@ -508,12 +510,20 @@ async def select_bouquet_callback(callback: CallbackQuery) -> None:
 
     await callback.answer("Вариант выбран.")
     if callback.message is not None:
-        await callback.message.answer(
-            _build_selected_bouquet_message(option),
-            reply_markup=_customer_order_keyboard(
-                image_enabled=_is_image_generation_enabled(shop.id),
-            ),
+        reply_markup = _customer_order_keyboard(
+            image_enabled=_is_image_generation_enabled(shop.id),
         )
+        if option.get("image_url"):
+            await callback.message.answer_photo(
+                option["image_url"],
+                caption=_build_selected_bouquet_message(option),
+                reply_markup=reply_markup,
+            )
+        else:
+            await callback.message.answer(
+                _build_selected_bouquet_message(option),
+                reply_markup=reply_markup,
+            )
 
 
 @router.callback_query(F.data == "generate_image")
@@ -790,13 +800,14 @@ async def text_handler(message: Message) -> None:
             user_message=user_text,
         )
     except AIUnavailableError:
-        logger.exception("AI order parser is unavailable")
-        await message.answer(
-            "Я пока не могу подключиться к ИИ, но магазин уже выбран.\n\n"
-            f"Вы общаетесь с магазином «{shop.name}». "
-            "Напишите одним сообщением: для кого букет, повод, бюджет, "
-            "стиль или цвета, дату, адрес доставки и телефон.",
-            reply_markup=_manager_help_keyboard(),
+        await _handle_ai_unavailable_order_message(
+            message=message,
+            shop=shop,
+            shop_settings=shop_settings,
+            customer_id=customer.id,
+            state=state,
+            user_text=user_text,
+            flowers=flowers,
         )
         return
 
@@ -815,12 +826,19 @@ async def text_handler(message: Message) -> None:
         new_state = validation.state
 
     if validation is not None and validation.is_ready_for_options:
-        options = build_bouquet_options(
+        template_options = build_template_bouquet_options(
+            shop_id=shop.id,
+            budget=new_state.get("budget"),
+            colors=new_state.get("colors") or [],
+            style=new_state.get("style"),
+        )
+        stock_options = build_bouquet_options(
             flowers=flowers,
             budget=new_state.get("budget"),
             colors=new_state.get("colors") or [],
             style=new_state.get("style"),
         )
+        options = [*template_options, *stock_options]
         if options:
             new_state["bouquet_options"] = options
             new_state["selected_flowers"] = []
@@ -876,6 +894,178 @@ async def text_handler(message: Message) -> None:
             else None
         ),
     )
+
+
+async def _handle_ai_unavailable_order_message(
+    *,
+    message: Message,
+    shop,
+    shop_settings,
+    customer_id: int,
+    state: dict,
+    user_text: str,
+    flowers: list,
+) -> None:
+    logger.exception("AI order parser is unavailable")
+
+    new_state = _merge_fallback_order_details(state, user_text)
+    validation = validate_order_state(
+        new_state,
+        min_order_price=shop_settings.min_order_price if shop_settings else None,
+        timezone=shop.timezone,
+    )
+    new_state = validation.state
+
+    if validation.is_ready_for_options:
+        options = [
+            *build_template_bouquet_options(
+                shop_id=shop.id,
+                budget=new_state.get("budget"),
+                colors=new_state.get("colors") or [],
+                style=new_state.get("style"),
+            ),
+            *build_bouquet_options(
+                flowers=flowers,
+                budget=new_state.get("budget"),
+                colors=new_state.get("colors") or [],
+                style=new_state.get("style"),
+            ),
+        ]
+        if options:
+            new_state["bouquet_options"] = options
+            new_state["selected_flowers"] = []
+            new_state["estimated_price"] = None
+            new_state["is_ready_for_confirmation"] = False
+            reply = (
+                "AI сейчас недоступен, но я собрал варианты по данным из сообщения.\n\n"
+                + _build_bouquet_options_message(options)
+            )
+            reply_markup = _bouquet_options_keyboard(options)
+        else:
+            new_state["bouquet_options"] = []
+            new_state["is_ready_for_confirmation"] = False
+            reply = (
+                "AI сейчас недоступен, а подходящие варианты по складу не нашлись. "
+                "Лучше подключить менеджера, он быстро соберет букет вручную."
+            )
+            reply_markup = _manager_help_keyboard()
+    else:
+        new_state["is_ready_for_confirmation"] = False
+        new_state["bouquet_options"] = []
+        reply = (
+            "AI сейчас недоступен, но я сохранил то, что смог разобрать. "
+            + _build_validation_message(validation.errors)
+        )
+        reply_markup = _manager_help_keyboard()
+
+    update_conversation_state(
+        shop_id=shop.id,
+        customer_id=customer_id,
+        state=new_state,
+    )
+    add_conversation_log(
+        shop_id=shop.id,
+        customer_id=customer_id,
+        role="bot",
+        message=reply,
+        meta={"fallback": "ai_unavailable", "validation_errors": validation.errors},
+    )
+    await message.answer(reply, reply_markup=reply_markup)
+
+
+def _merge_fallback_order_details(state: dict, user_text: str) -> dict:
+    updated = dict(state)
+    text = (user_text or "").strip()
+    normalized = text.lower()
+
+    phone_match = re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", text)
+    if phone_match:
+        updated["phone"] = re.sub(r"[^\d+]", "", phone_match.group(0))
+
+    budget_match = re.search(
+        r"(?:бюджет|до|на|примерно)?\s*(\d+(?:[.,]\d+)?)\s*(тыс|тысяч|к|k)?",
+        normalized,
+    )
+    if budget_match and any(word in normalized for word in ("бюджет", "руб", "тыс", "₽")):
+        amount = float(budget_match.group(1).replace(",", "."))
+        if budget_match.group(2):
+            amount *= 1000
+        updated["budget"] = amount
+
+    for marker, value in (
+        ("послезавтра", "послезавтра"),
+        ("завтра", "завтра"),
+        ("сегодня", "сегодня"),
+    ):
+        if marker in normalized:
+            updated["delivery_date"] = value
+            break
+    if not updated.get("delivery_date"):
+        date_match = re.search(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b", text)
+        if date_match:
+            updated["delivery_date"] = date_match.group(0)
+
+    recipient_markers = {
+        "мам": "мама",
+        "жен": "жена/девушка",
+        "девуш": "жена/девушка",
+        "подруг": "подруга",
+        "сестр": "сестра",
+        "муж": "мужчина",
+        "парн": "мужчина",
+    }
+    if not updated.get("recipient"):
+        for marker, value in recipient_markers.items():
+            if marker in normalized:
+                updated["recipient"] = value
+                break
+
+    if not updated.get("occasion"):
+        if "день рождения" in normalized or re.search(r"\bдр\b", normalized):
+            updated["occasion"] = "день рождения"
+        elif "без повода" in normalized:
+            updated["occasion"] = "без повода"
+
+    style_markers = {
+        "нежн": "нежный",
+        "ярк": "яркий",
+        "романтич": "романтичный",
+        "классич": "классический",
+        "минимал": "минималистичный",
+        "пастел": "пастельный",
+    }
+    if not updated.get("style"):
+        for marker, value in style_markers.items():
+            if marker in normalized:
+                updated["style"] = value
+                break
+
+    color_markers = {
+        "красн": "red",
+        "син": "blue",
+        "голуб": "blue",
+        "бел": "white",
+        "розов": "pink",
+        "желт": "yellow",
+        "фиолет": "purple",
+        "сирен": "lavender",
+        "лаванд": "lavender",
+    }
+    colors = list(updated.get("colors") or [])
+    for marker, value in color_markers.items():
+        if marker in normalized and value not in colors:
+            colors.append(value)
+    updated["colors"] = colors
+
+    address_match = re.search(
+        r"(?:адрес|доставка|доставить)\s+(.+?)(?:\s+(?:телефон|тел|номер|\+?\d[\d\s().-]{7,}\d)|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if address_match:
+        updated["delivery_address"] = address_match.group(1).strip(" ,.;")
+
+    return updated
 
 
 def _apply_customer_history_shortcuts(
@@ -1040,6 +1230,7 @@ def _status_label(status: str) -> str:
     labels = {
         "new": "новый",
         "accepted": "принят",
+        "awaiting_payment": "ожидает оплаты",
         "in_progress": "в работе",
         "done": "готов",
         "cancelled": "отменен",
@@ -1052,6 +1243,7 @@ def _build_customer_status_message(order_id: int, status: str) -> str:
     status_label = _status_label(status)
     messages = {
         "accepted": "Менеджер принял заказ и скоро уточнит детали.",
+        "awaiting_payment": "Счет отправлен, ожидаем оплату.",
         "in_progress": "Заказ уже в работе.",
         "done": "Заказ готов.",
         "cancelled": "Заказ отменен. Если это ошибка, напишите /manager.",
@@ -1222,7 +1414,7 @@ async def _submit_order(
     update_conversation_state(
         shop_id=shop.id,
         customer_id=customer_id,
-        state={**state, "order_submitted": True},
+        state={**state, "order_submitted": True, "submitted_order_id": order.id},
     )
 
     customer = get_customer_by_id(customer_id)

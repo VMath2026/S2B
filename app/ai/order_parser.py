@@ -302,6 +302,9 @@ def _build_system_prompt(
             f"Tone: {shop_settings.tone}\n"
             f"Minimum order price: {shop_settings.min_order_price}\n"
             f"Delivery price: {shop_settings.delivery_price}\n"
+            f"Free delivery from: {shop_settings.free_delivery_from}\n"
+            f"Urgent delivery price: {shop_settings.urgent_delivery_price}\n"
+            f"Pickup enabled: {shop_settings.pickup_enabled}\n"
             f"Working hours: {shop_settings.working_hours}\n"
         )
 

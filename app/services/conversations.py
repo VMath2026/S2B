@@ -27,6 +27,7 @@ DEFAULT_ORDER_STATE = {
     "summary": None,
     "is_ready_for_confirmation": False,
     "order_submitted": False,
+    "submitted_order_id": None,
     "manager_requested": False,
     "ai_requests_used": 0,
 }
@@ -151,6 +152,21 @@ def list_conversation_logs_for_customer(
                 .where(
                     ConversationLog.shop_id == shop_id,
                     ConversationLog.customer_id == customer_id,
+                )
+                .order_by(ConversationLog.id.desc())
+                .limit(limit)
+            ).all()
+        )
+
+
+def list_error_logs_for_shop(shop_id: int, limit: int = 80) -> list[ConversationLog]:
+    with SessionLocal() as session:
+        return list(
+            session.scalars(
+                select(ConversationLog)
+                .where(
+                    ConversationLog.shop_id == shop_id,
+                    ConversationLog.role == "error",
                 )
                 .order_by(ConversationLog.id.desc())
                 .limit(limit)

@@ -75,6 +75,72 @@ def reserve_selected_flowers(shop_id: int, selected_flowers: list[dict]) -> list
         return []
 
 
+def release_reserved_flowers(shop_id: int, selected_flowers: list[dict]) -> None:
+    _apply_reserved_flowers_delta(
+        shop_id=shop_id,
+        selected_flowers=selected_flowers,
+        mode="release",
+    )
+
+
+def fulfill_reserved_flowers(shop_id: int, selected_flowers: list[dict]) -> None:
+    _apply_reserved_flowers_delta(
+        shop_id=shop_id,
+        selected_flowers=selected_flowers,
+        mode="fulfill",
+    )
+
+
+def _apply_reserved_flowers_delta(
+    *,
+    shop_id: int,
+    selected_flowers: list[dict],
+    mode: str,
+) -> None:
+    if not selected_flowers:
+        return
+
+    with SessionLocal() as session:
+        flowers = list(
+            session.scalars(
+                select(Flower).where(
+                    Flower.shop_id == shop_id,
+                    Flower.is_active.is_(True),
+                )
+            ).all()
+        )
+        flowers_by_identity = {
+            _flower_identity(flower.name, flower.color): flower for flower in flowers
+        }
+        flowers_by_name: dict[str, list[Flower]] = {}
+        for flower in flowers:
+            flowers_by_name.setdefault(
+                str(flower.name or "").strip().lower(),
+                [],
+            ).append(flower)
+
+        for selected in selected_flowers:
+            name = str(selected.get("name") or "").strip()
+            color = selected.get("color")
+            quantity = int(selected.get("quantity") or 0)
+            if not name or quantity <= 0:
+                continue
+
+            flower = flowers_by_identity.get(_flower_identity(name, color))
+            same_name_flowers = flowers_by_name.get(name.lower(), [])
+            if flower is None and len(same_name_flowers) == 1:
+                flower = same_name_flowers[0]
+            if flower is None:
+                continue
+
+            released = min(flower.quantity_reserved, quantity)
+            flower.quantity_reserved -= released
+            if mode == "fulfill":
+                flower.quantity_available = max(0, flower.quantity_available - released)
+
+        session.commit()
+
+
 def _flower_identity(name: object, color: object) -> tuple[str, str]:
     return (
         str(name or "").strip().lower(),
